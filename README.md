@@ -1,69 +1,74 @@
 # Local AI Starter
 
-Мастер, который ставит и запускает локальную языковую модель на вашем компьютере
-(macOS, Linux, Windows). Без облака, без ключей, без параметров командной строки.
+English | [Русский](README.ru.md)
 
-## Как запустить
+A wizard that installs and runs a local language model on your computer
+(macOS, Linux, Windows). No cloud, no API keys, no command-line flags.
 
-- **macOS:** дважды щёлкните «Запустить Local AI Starter.command» (в первый раз —
-  правый клик → «Открыть», так просит Gatekeeper).
-- **Windows:** дважды щёлкните «Запустить Local AI Starter.bat».
-- **Linux:** в терминале `./"Запустить Local AI Starter.sh"` (в файловых менеджерах — двойной клик, если разрешён запуск скриптов).
-- **Вручную на любой системе:** `python3 local_ai_starter.py`.
+> The wizard's on-screen text is currently in Russian.
 
-Нужен Python 3.9+. Дальше мастер задаёт вопросы с готовыми вариантами: везде
-подойдёт просто **Enter** (выбирается рекомендованный вариант).
+## How to run
 
-1. «Для чего вам помощник?» — чат и тексты или программирование в OpenCode.
-2. Мастер проверяет память и диск и предлагает модель; показывает размер загрузки.
-3. План и подтверждение «Начинаем?».
-4. Скачивание движка и модели, запуск, пробный вопрос; затем открывается чат в
-   браузере (или готов учебный проект OpenCode).
+- **macOS:** double-click `Запустить Local AI Starter.command` (the first time:
+  right-click → Open, Gatekeeper asks for this).
+- **Windows:** double-click `Запустить Local AI Starter.bat`.
+- **Linux:** in a terminal, `./"Запустить Local AI Starter.sh"` (double-click works in
+  file managers that allow running scripts).
+- **Any system, manually:** `python3 local_ai_starter.py`.
 
-При следующем запуске появляется меню: запустить и открыть чат, остановить,
-сменить модель, учебный проект в OpenCode, состояние и журнал, удалить всё.
+Requires Python 3.9+. The wizard asks questions with ready-made options; just
+press **Enter** to take the recommended one.
 
-## Что на диске
+1. "What do you need the assistant for?" — chat and writing, or coding with OpenCode.
+2. It checks memory and disk space and suggests a model, showing the download size.
+3. A plan and a confirmation ("Start?").
+4. It downloads the engine and the model, starts the server, sends a test
+   question, then opens the chat in your browser (or prepares the OpenCode demo project).
 
-Всё лежит в папке `local-ai` рядом со скриптом. Больше нигде ничего нет: PATH,
-конфигурации оболочки и глобальные настройки OpenCode не меняются.
+On later runs you get a menu: start and open chat, stop the server, switch model,
+OpenCode demo project, status and log, delete everything.
+
+## What goes on disk
+
+Everything lives in the `local-ai` folder next to the script. Nowhere else:
+PATH, shell configs and global OpenCode settings are never touched.
 
 ```
 local-ai/
-  bin/            движок llama.cpp (закреплённая сборка, проверка SHA-256)
-  models/         веса модели (скачиваются при первом запуске)
-  opencode-home/  OpenCode, если у вас его не было
-  demo-project/   учебный проект с opencode.json
+  bin/            llama.cpp engine (pinned build, SHA-256 verified)
+  models/         model weights (downloaded on first run)
+  opencode-home/  OpenCode, if you did not have it
+  demo-project/   demo project with opencode.json
   state.json, server.log
 ```
 
-Удалить всё: пункт меню «Удалить всё, что скачано» или просто удалить папку `local-ai`.
-Сервер слушает только `127.0.0.1`.
+To remove everything: the "delete everything" menu item, or just delete the
+`local-ai` folder. The server listens on `127.0.0.1` only.
 
-## Модели
+## Models
 
-| Профиль | Модель | Загрузка | Память |
+| Profile | Model | Download | Memory |
 |---|---|---|---|
-| Быстрый | Qwen3-4B Q4_K_M | ~2,5 ГБ | от 8 ГБ |
-| Универсальный | Qwen3-8B Q4_K_M | ~5 ГБ | от 16 ГБ |
-| Для программирования | Qwen2.5-Coder-7B Q4_K_M, контекст 32K | ~4,7 ГБ | от 16 ГБ |
+| Fast | Qwen3-4B Q4_K_M | ~2.5 GB | 8 GB+ |
+| General | Qwen3-8B Q4_K_M | ~5 GB | 16 GB+ |
+| Coding | Qwen2.5-Coder-7B Q4_K_M, 32K context | ~4.7 GB | 16 GB+ |
 
-Это кандидаты, а не обещание скорости. Размеры ориентировочные.
+These are candidates, not a performance promise. Sizes are approximate.
 
-## Границы
+## Limits
 
-- Движок — CPU-сборка для Windows и Linux (на Mac используется Metal). Ускорение
-  видеокартой на Windows/Linux пока не настраивается.
-- OpenCode ставится мастером только на macOS/Linux; на Windows — вручную (лучше через WSL).
-- Для проверки без установки: переменная `LOCAL_AI_STARTER_DRY_RUN=1`.
+- The engine is a CPU build on Windows and Linux (Metal is used on Mac). GPU
+  acceleration on Windows/Linux is not configured yet.
+- The wizard installs OpenCode only on macOS/Linux; on Windows install it yourself (WSL recommended).
+- To check the flow without installing anything: set `LOCAL_AI_STARTER_DRY_RUN=1`.
 
-## Чек-лист ручной проверки перед публикацией
+## Manual test checklist
 
-macOS Apple Silicon: чистый запуск → ответ → повторный запуск → остановка → «Удалить всё».
-Прерванная загрузка модели, занятый порт 8080, нехватка места. Ветка OpenCode:
-реально ли модель вызывает инструменты (правка `index.html`). Linux и Windows —
-на реальных машинах.
+macOS Apple Silicon: clean start → answer → restart → stop → "delete everything".
+Interrupted model download, port 8080 in use, low disk space. OpenCode branch:
+does the model really call tools (editing `index.html`). Linux and Windows on real machines.
 
-## Лицензия
+## License
 
-MIT, см. [LICENSE](LICENSE). Скрипт скачивает сторонние компоненты (llama.cpp, модели Qwen, OpenCode) под их собственными лицензиями.
+MIT, see [LICENSE](LICENSE). The script downloads third-party components
+(llama.cpp, Qwen models, OpenCode) under their own licenses.
