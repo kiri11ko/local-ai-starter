@@ -63,3 +63,21 @@ stop → delete everything; interrupted download, busy port 8080, low disk, Open
 - Cross-platform branches matter: on Windows `os.kill(pid, 0)` kills the process, so
   `pid_alive` uses `tasklist`; stopping uses `taskkill /T` vs `killpg`.
 - `README.md` (English, primary) and `README.ru.md` must be kept in sync.
+
+## LLM Wiki Schema
+
+Project knowledge lives in `docs/wiki/` (LLM Wiki pattern, Karpathy): raw sources are
+`local_ai_starter.py`, the launchers and the READMEs; the wiki is maintained by Claude; this
+file is the schema. Start from `docs/wiki/index.md`; current state is in `docs/wiki/status.md`.
+
+- Structure: `index.md`, `log.md` (append-only), `status.md`, `architecture.md`,
+  `debugging_log.md`, `entities/` (wizard-flow, profiles, llama-engine, server-lifecycle,
+  opencode-integration, launchers), `workflows/` (build, test, update-llama-build).
+- Ingest: new info → its one canonical page → dated `log.md` entry → `status.md` if affected.
+  Query: wiki first, code as fallback, file the answer back. Lint: contradictions, stale
+  `file:line` refs, orphans, missing links. Full procedures — the `/wiki` command.
+- Conventions: one fact per page (link, don't copy); `file:line` refs; absolute dates
+  `YYYY-MM-DD`; no emojis; entity pages use Purpose / Key API / Collaborators / Known Issues /
+  Related Pages. Wiki text is in Russian. When code is the truth and the wiki disagrees,
+  fix the wiki and log it.
+- Not in the wiki: code listings, conversation state, personal preferences.
