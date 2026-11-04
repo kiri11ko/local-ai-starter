@@ -1,22 +1,23 @@
 # Launchers
 
-Source: [`Запустить Local AI Starter.command`](../../../Запустить%20Local%20AI%20Starter.command),
-[`.sh`](../../../Запустить%20Local%20AI%20Starter.sh), [`.bat`](../../../Запустить%20Local%20AI%20Starter.bat)
+Source: [`RunMe.command`](../../../RunMe.command), [`RunMe.sh`](../../../RunMe.sh),
+[`RunMe.bat`](../../../RunMe.bat)
 
 ## Purpose
 Запуск двойным кликом без терминала. Логики мастера в них нет.
 
 ## Key API
-- `.command` (macOS) и `.sh` (Linux): переходят в папку скрипта, проверяют `python3`,
-  запускают мастер; при ненулевом коде ждут Enter, чтобы окно не закрылось.
-- `.bat` (Windows): `chcp 65001` для кириллицы, ищет `py -3`, затем `python`, в конце `pause`.
+- `RunMe.command` (macOS) и `RunMe.sh` (Linux): переходят в папку скрипта, проверяют `python3`,
+  запускают мастер с аргументами (`"$@"`), при ненулевом коде ждут Enter.
+- `RunMe.bat` (Windows, CRLF): `chcp 65001`, ищет `py -3`, затем `python`, передаёт `%*`, в конце `pause`.
+- Тексты только на английском: они выводятся до Python, когда [i18n](i18n.md) ещё недоступна.
 
 ## Collaborators
-- [wizard-flow](wizard-flow.md) — `main()` и коды возврата.
+- [wizard-flow](wizard-flow.md) — `main(argv)`, флаг `--menu`.
 
 ## Known Issues
 - На macOS первый запуск `.command` требует «правый клик → Открыть» (Gatekeeper).
-- `.command` и `.sh` должны оставаться исполняемыми (`chmod +x`) в git.
+- `.command` и `.sh` должны оставаться исполняемыми в git (режим 100755).
 
 ## Related Pages
 [build](../workflows/build.md)

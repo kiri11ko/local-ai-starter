@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Local AI Starter — мастер запуска локальной модели через llama.cpp.
+"""Local AI Starter: one click from nothing to OpenCode on a local model.
 
-Запуск без параметров:  python3 local_ai_starter.py  (или двойной клик по
-«Запустить Local AI Starter.command» / «.bat»).
+Run with no arguments: ``python3 local_ai_starter.py`` (or double-click RunMe.*).
+``--menu`` opens the management menu without starting OpenCode.
 
-Всё, что скачивает и создаёт скрипт, лежит в папке ``local-ai`` рядом с ним:
-движок, веса модели, журнал, учебный проект. Удалить папку = удалить всё.
-Сервер слушает только 127.0.0.1. Глобальные настройки и PATH не меняются.
+Everything the script downloads or creates lives in the ``local-ai`` folder next to
+it: engine, models (``models/<family>/``), OpenCode, its settings, the workspace and
+the log. Deleting that folder removes everything. The server listens on 127.0.0.1
+only. PATH, shell configs and global OpenCode settings are never touched.
 """
 
 from __future__ import annotations
@@ -18,11 +19,13 @@ import platform
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tarfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
@@ -31,16 +34,21 @@ from pathlib import Path
 
 DRY_RUN = os.environ.get("LOCAL_AI_STARTER_DRY_RUN") == "1"
 DEFAULT_PORT = 8080
+NET_CHECK_TIMEOUT = 15   # seconds to wait for a host to answer the pre-flight check
+STALL_TIMEOUT = 30       # seconds without a single byte before a download is retried
+DOWNLOAD_ATTEMPTS = 5
 
 ROOT = Path(os.environ.get("LOCAL_AI_STARTER_HOME") or (Path(__file__).resolve().parent / "local-ai"))
 BIN_DIR = ROOT / "bin"
 MODELS_DIR = ROOT / "models"
+OPENCODE_DIR = ROOT / "opencode"
 OPENCODE_HOME = ROOT / "opencode-home"
-DEMO_DIR = ROOT / "demo-project"
+OPENCODE_CONFIG = ROOT / "opencode.json"
+WORKSPACE_DIR = ROOT / "workspace"
 STATE_FILE = ROOT / "state.json"
 LOG_FILE = ROOT / "server.log"
 
-# Закреплённая сборка llama.cpp: одна версия для всех, хеши с страницы релиза.
+# Pinned llama.cpp build: one version for everyone, hashes from the release page.
 LLAMA_BUILD = "b12110"
 LLAMA_URL = "https://github.com/ggml-org/llama.cpp/releases/download/{build}/llama-{build}-bin-{plat}.{ext}"
 LLAMA_SHA256 = {
@@ -51,70 +59,469 @@ LLAMA_SHA256 = {
     "win-cpu-x64": "98901e327c252875accaf2d1bf364e10e868843b0b63468baad1aa945cdc5da2",
     "win-cpu-arm64": "f8d20fb07d0b499988ced8963afcd5ded2d2cdd9983b757fbc7e51c4abd722e8",
 }
-OPENCODE_INSTALL_URL = "https://opencode.ai/install"
+LLAMA_SIZE_MB = 40
+
+# Pinned OpenCode CLI build, same idea: official GitHub release asset + SHA-256.
+OPENCODE_VERSION = "v1.19.5"
+OPENCODE_URL = "https://github.com/anomalyco/opencode/releases/download/{ver}/opencode-{plat}.{ext}"
+OPENCODE_SHA256 = {
+    "darwin-arm64": "c1c9e62521192192ef4c3ed1355ada2144055bddb61682217e997b03c55203c1",
+    "darwin-x64": "b0212efa6db347187225a17fa3a31c6b261bf4c9f1589a290b0ca902d720d250",
+    "linux-arm64": "fae5be262d693b7c5e562856cc473e59e741772936db0c0600ac0d5ed5bd088b",
+    "linux-x64": "588310a336fa3b9df36b3f0225b26f679d453efaad0cf3d66c3651ef3ec1647a",
+    "windows-arm64": "5d49139bd917511ff35a3c06065c9f47918346668f05ea020e778286f302fbb7",
+    "windows-x64": "09a6e693157f0887e504f2cf4357a8cbddc5ead5d0dffb9a269dcc47c48640f5",
+}
+OPENCODE_SIZE_MB = 80
 
 
 @dataclass(frozen=True)
 class Profile:
-    key: str
-    title: str
-    purpose: str
-    hf_model: str
-    context: int
-    download: str
+    key: str          # server alias and OpenCode model id
+    family: str       # folder under models/
+    repo: str         # Hugging Face repository
+    file: str         # GGUF file name in the repository
+    size: int         # bytes
+    sha256: str
     min_ram_gb: int
+
+    @property
+    def path(self) -> Path:
+        return MODELS_DIR / self.family / self.file
+
+    @property
+    def url(self) -> str:
+        return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
 
 
 PROFILES = {
-    "fast": Profile("fast", "Быстрый", "короткие ответы, черновики; идёт даже на скромном компьютере",
-                    "Qwen/Qwen3-4B-GGUF:Q4_K_M", 8192, "около 2,5 ГБ", 8),
-    "general": Profile("general", "Универсальный", "тексты, объяснения, повседневные задачи",
-                       "Qwen/Qwen3-8B-GGUF:Q4_K_M", 8192, "около 5 ГБ", 16),
-    "code": Profile("code", "Для программирования", "помощник в OpenCode, нужен запас памяти",
-                    "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M", 32768, "около 4,7 ГБ", 16),
+    "qwen3-4b": Profile("qwen3-4b", "qwen", "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf", 2497280256,
+                        "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5", 8),
+    "qwen3-8b": Profile("qwen3-8b", "qwen", "Qwen/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M.gguf", 5027783488,
+                        "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785", 12),
+    "qwen2.5-coder-7b": Profile("qwen2.5-coder-7b", "qwen", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+                                "qwen2.5-coder-7b-instruct-q4_k_m.gguf", 4683073536,
+                                "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c", 12),
 }
 
 
-# ───────────────────────────── ввод-вывод ─────────────────────────────
+# ───────────────────────────── strings ─────────────────────────────
+
+STRINGS = {
+    "en": {
+        "title": "Local AI Starter",
+        "tagline": "A local AI assistant on your computer. No cloud, no keys.",
+        "hint_arrows": "↑/↓ to move, Enter to choose",
+        "hint_numbers": "Type a number or just press Enter.",
+        "bad_number": "Type a number from 1 to {n}, or just press Enter.",
+        "yes": "Yes", "no": "No",
+        "recommended": "recommended",
+        "cancelled": "Cancelled.",
+        "gb": "GB", "mb": "MB", "mbs": "MB/s", "eta": "left",
+        "error": "Error: {error}",
+        "system_check": "Checking your computer",
+        "system": "System", "memory": "Memory", "disk_free": "Free disk space",
+        "unknown": "unknown",
+        "pick_model": "Which model should the assistant use?",
+        "model.qwen3-4b": "Qwen3 4B, fast: runs even on a modest computer",
+        "model.qwen3-8b": "Qwen3 8B, balanced: smarter, wants 12 GB+ of memory",
+        "model.qwen2.5-coder-7b": "Qwen2.5 Coder 7B: tuned for code",
+        "low_ram": "This model wants {need} GB of memory, you have {have:.0f} GB. It may be slow.",
+        "continue_anyway": "Continue anyway?",
+        "low_disk": "Not enough free space: about {need:.1f} GB is needed, {have:.1f} GB is free.",
+        "plan": "Plan",
+        "plan_engine": "llama.cpp engine {build}",
+        "plan_model": "Model {file}",
+        "plan_opencode": "OpenCode {ver}",
+        "plan_total": "Total download: about {gb:.1f} GB, into {root}",
+        "start": "Start?",
+        "net_check": "Checking that the download servers are reachable…",
+        "net_ok": "{host}: reachable",
+        "net_fail_title": "{host} is not reachable from this network.",
+        "net_reason.timeout": "It did not answer within {sec} seconds.",
+        "net_reason.dns": "Its name could not be resolved (DNS).",
+        "net_reason.refused": "The connection was refused or reset.",
+        "net_reason.ssl": "The secure connection failed; a proxy or filter may be intercepting traffic.",
+        "net_reason.http": "The server answered with an error: HTTP {code}.",
+        "net_reason.other": "{detail}",
+        "net_missing": "{host}: file not found (HTTP 404): {url}\nThe pinned version may have been removed. "
+                       "Get a fresh copy of Local AI Starter.",
+        "net_advice": "The resource is probably blocked or restricted on this network. Try another network "
+                      "(for example a phone hotspot), a VPN, or a proxy (set HTTPS_PROXY), then run RunMe "
+                      "again. Finished downloads are kept, interrupted ones resume.",
+        "step": "[{i}/{n}] {what}",
+        "downloading": "Downloading {name}",
+        "download_retry": "Connection dropped ({reason}). Retrying in {sec} s, attempt {i} of {n}…",
+        "verifying": "Checking the file…",
+        "hash_ok": "File verified.",
+        "hash_bad": "Checksum of {name} did not match; the file was deleted. Run RunMe again.",
+        "extracting": "Unpacking…",
+        "no_server_binary": "llama-server is missing from the archive; the build layout may have changed.",
+        "no_opencode_binary": "opencode is missing from the archive; the release layout may have changed.",
+        "unsupported_platform": "Platform {system} {machine} is not supported.",
+        "no_free_port": "No free port found near 8080.",
+        "starting_server": "Loading the model into memory…",
+        "server_stopped": "The server stopped. Last log line: {line}\nFull log: {log}",
+        "server_timeout": "The server did not start in {min} minutes. See the log: {log}",
+        "server_test": "Server is up. Asking a test question…",
+        "server_no_answer": "The server is running but does not answer. See the log: {log}",
+        "server_ok": "The model answers. All set.",
+        "server_running": "Server is already running.",
+        "port_busy": "Port {busy} is busy, using {port}.",
+        "stopping": "Stopping the server (PID {pid}).",
+        "no_server": "No server is running.",
+        "opencode_intro": "Opening OpenCode in {dir}",
+        "opencode_tips": "Type a request and press Enter, for example: “{example}”.\n"
+                         "OpenCode asks before it changes files. Quit with /exit or Ctrl+C.",
+        "opencode_example": "Change the heading in index.html and add a dark theme toggle",
+        "opencode_missing": "OpenCode is not installed.",
+        "dry_run_would": "[dry-run] would {what}",
+        "menu_title": "What next?",
+        "menu.stop_exit": "Stop the server and exit",
+        "menu.keep_exit": "Exit, keep the server running",
+        "menu.opencode": "Back to OpenCode",
+        "menu.chat": "Open the web chat in the browser",
+        "menu.switch": "Switch model",
+        "menu.models": "Models on disk",
+        "menu.status": "Status and log",
+        "menu.uninstall": "Delete everything that was downloaded",
+        "chat_url": "Chat: {url}",
+        "models_title": "Models in {dir}",
+        "models_none": "No models downloaded yet.",
+        "models_total": "Total: {gb:.1f} GB",
+        "models_pick": "Delete a model?",
+        "models_back": "Back",
+        "models_open": "Open the models folder",
+        "models_deleted": "Deleted {file}.",
+        "status_root": "Data folder", "status_engine": "Engine", "status_opencode": "OpenCode",
+        "status_server": "Server", "status_model": "Model", "status_log": "Log", "status_last": "Last line",
+        "installed": "installed", "not_installed": "not installed",
+        "running_on": "running, port {port}", "not_running": "not running",
+        "uninstall_warn": "The whole folder {root} will be deleted: engine, models, OpenCode and the workspace.",
+        "uninstall_confirm": "Delete everything?",
+        "uninstall_done": "Done. Nothing else is left on the system.",
+        "demo_title": "Practice page",
+        "demo_heading": "Hello!",
+        "demo_text": "Ask the assistant: “change the heading and add a dark theme toggle”.",
+    },
+    "ru": {
+        "title": "Local AI Starter",
+        "tagline": "Локальный ИИ-помощник на вашем компьютере. Без облака и ключей.",
+        "hint_arrows": "↑/↓ — выбор, Enter — подтвердить",
+        "hint_numbers": "Введите номер или просто нажмите Enter.",
+        "bad_number": "Введите число от 1 до {n} или просто нажмите Enter.",
+        "yes": "Да", "no": "Нет",
+        "recommended": "рекомендую",
+        "cancelled": "Отменено.",
+        "gb": "ГБ", "mb": "МБ", "mbs": "МБ/с", "eta": "осталось",
+        "error": "Ошибка: {error}",
+        "system_check": "Проверка компьютера",
+        "system": "Система", "memory": "Память", "disk_free": "Свободно на диске",
+        "unknown": "не удалось определить",
+        "pick_model": "Какую модель взять помощнику?",
+        "model.qwen3-4b": "Qwen3 4B, быстрая: идёт даже на скромном компьютере",
+        "model.qwen3-8b": "Qwen3 8B, сбалансированная: умнее, нужно от 12 ГБ памяти",
+        "model.qwen2.5-coder-7b": "Qwen2.5 Coder 7B: заточена под код",
+        "low_ram": "Этой модели желательно {need} ГБ памяти, у вас {have:.0f} ГБ. Может работать медленно.",
+        "continue_anyway": "Всё равно продолжить?",
+        "low_disk": "Мало места: нужно около {need:.1f} ГБ, свободно {have:.1f} ГБ.",
+        "plan": "План",
+        "plan_engine": "Движок llama.cpp {build}",
+        "plan_model": "Модель {file}",
+        "plan_opencode": "OpenCode {ver}",
+        "plan_total": "Всего скачать: около {gb:.1f} ГБ, в {root}",
+        "start": "Начинаем?",
+        "net_check": "Проверяю, доступны ли серверы для загрузки…",
+        "net_ok": "{host}: доступен",
+        "net_fail_title": "{host} недоступен из этой сети.",
+        "net_reason.timeout": "Не ответил за {sec} секунд.",
+        "net_reason.dns": "Не удалось найти адрес по имени (DNS).",
+        "net_reason.refused": "Соединение отклонено или сброшено.",
+        "net_reason.ssl": "Не удалось установить защищённое соединение; возможно, трафик перехватывает прокси или фильтр.",
+        "net_reason.http": "Сервер ответил ошибкой: HTTP {code}.",
+        "net_reason.other": "{detail}",
+        "net_missing": "{host}: файл не найден (HTTP 404): {url}\nВозможно, закреплённую версию убрали с сервера. "
+                       "Скачайте свежую версию Local AI Starter.",
+        "net_advice": "Похоже, этот ресурс заблокирован или ограничен в вашей сети. Попробуйте другую сеть "
+                      "(например, раздачу с телефона), VPN или прокси (переменная HTTPS_PROXY), затем снова "
+                      "запустите RunMe. Скачанное сохранится, прерванное докачается.",
+        "step": "[{i}/{n}] {what}",
+        "downloading": "Скачиваю {name}",
+        "download_retry": "Связь прервалась ({reason}). Повтор через {sec} с, попытка {i} из {n}…",
+        "verifying": "Проверяю файл…",
+        "hash_ok": "Файл проверен.",
+        "hash_bad": "Контрольная сумма {name} не совпала, файл удалён. Запустите RunMe ещё раз.",
+        "extracting": "Распаковываю…",
+        "no_server_binary": "В архиве нет llama-server — возможно, сборка изменила состав.",
+        "no_opencode_binary": "В архиве нет opencode — возможно, релиз изменил состав.",
+        "unsupported_platform": "Платформа {system} {machine} не поддерживается.",
+        "no_free_port": "Не нашёл свободный порт рядом с 8080.",
+        "starting_server": "Загружаю модель в память…",
+        "server_stopped": "Сервер остановился. Последняя строка журнала: {line}\nПолный журнал: {log}",
+        "server_timeout": "Сервер не запустился за {min} минут. Смотрите журнал: {log}",
+        "server_test": "Сервер запущен. Задаю пробный вопрос…",
+        "server_no_answer": "Сервер запущен, но не отвечает. Смотрите журнал: {log}",
+        "server_ok": "Модель отвечает. Всё готово.",
+        "server_running": "Сервер уже работает.",
+        "port_busy": "Порт {busy} занят, использую {port}.",
+        "stopping": "Останавливаю сервер (PID {pid}).",
+        "no_server": "Запущенного сервера нет.",
+        "opencode_intro": "Открываю OpenCode в папке {dir}",
+        "opencode_tips": "Напишите задачу и нажмите Enter, например: «{example}».\n"
+                         "OpenCode спросит, прежде чем менять файлы. Выход — /exit или Ctrl+C.",
+        "opencode_example": "Измени заголовок в index.html и добавь переключатель тёмной темы",
+        "opencode_missing": "OpenCode не установлен.",
+        "dry_run_would": "[dry-run] сделал бы: {what}",
+        "menu_title": "Что дальше?",
+        "menu.stop_exit": "Остановить сервер и выйти",
+        "menu.keep_exit": "Выйти, сервер оставить работать",
+        "menu.opencode": "Вернуться в OpenCode",
+        "menu.chat": "Открыть веб-чат в браузере",
+        "menu.switch": "Сменить модель",
+        "menu.models": "Модели на диске",
+        "menu.status": "Состояние и журнал",
+        "menu.uninstall": "Удалить всё, что скачано",
+        "chat_url": "Чат: {url}",
+        "models_title": "Модели в {dir}",
+        "models_none": "Пока ни одной модели не скачано.",
+        "models_total": "Всего: {gb:.1f} ГБ",
+        "models_pick": "Удалить модель?",
+        "models_back": "Назад",
+        "models_open": "Открыть папку с моделями",
+        "models_deleted": "Удалено: {file}.",
+        "status_root": "Папка данных", "status_engine": "Движок", "status_opencode": "OpenCode",
+        "status_server": "Сервер", "status_model": "Модель", "status_log": "Журнал", "status_last": "Последняя строка",
+        "installed": "установлен", "not_installed": "не установлен",
+        "running_on": "работает, порт {port}", "not_running": "не запущен",
+        "uninstall_warn": "Будет удалена папка {root} целиком: движок, модели, OpenCode и рабочая папка.",
+        "uninstall_confirm": "Удалить всё?",
+        "uninstall_done": "Готово. В системе ничего больше не осталось.",
+        "demo_title": "Учебная страница",
+        "demo_heading": "Привет!",
+        "demo_text": "Попросите помощника: «измени заголовок и добавь переключатель тёмной темы».",
+    },
+}
+
+
+def detect_lang() -> str:
+    """Russian for a Russian system locale, English otherwise. LOCAL_AI_STARTER_LANG overrides."""
+    forced = os.environ.get("LOCAL_AI_STARTER_LANG", "").lower()
+    if forced in STRINGS:
+        return forced
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        value = os.environ.get(name, "")
+        if value and value not in {"C", "POSIX"} and not value.startswith("C."):
+            return "ru" if value.lower().startswith("ru") else "en"
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"],
+                                 capture_output=True, text=True, timeout=3).stdout
+            first = out.replace("(", "").replace('"', "").split(",")[0].strip().lower()
+            return "ru" if first.startswith("ru") else "en"
+        if system == "Windows":
+            import ctypes
+            return "ru" if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x19 else "en"
+    except Exception:
+        pass
+    return "en"
+
+
+LANG = detect_lang()
+
+
+def t(key: str, **kwargs) -> str:
+    text = STRINGS[LANG].get(key) or STRINGS["en"][key]
+    return text.format(**kwargs) if kwargs else text
+
+
+def size_text(gigabytes: float) -> str:
+    if gigabytes >= 1:
+        return f"{gigabytes:.1f} {t('gb')}"
+    return f"{gigabytes * 1024:.0f} {t('mb')}"
+
+
+# ───────────────────────────── terminal ─────────────────────────────
 
 class Cancelled(Exception):
     pass
+
+
+class NetworkError(RuntimeError):
+    pass
+
+
+def _enable_ansi() -> bool:
+    if not sys.stdout.isatty() or os.environ.get("TERM") == "dumb":
+        return False
+    if platform.system() != "Windows":
+        return True
+    try:
+        import ctypes
+        kernel = ctypes.windll.kernel32
+        handle = kernel.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not kernel.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        return bool(kernel.SetConsoleMode(handle, mode.value | 0x0004))  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        return False
+
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+ANSI = _enable_ansi()
+COLOR = ANSI and "NO_COLOR" not in os.environ
+INTERACTIVE = ANSI and sys.stdin.isatty()
+
+
+def paint(text: str, code: str) -> str:
+    return f"\x1b[{code}m{text}\x1b[0m" if COLOR else text
+
+
+def bold(text: str) -> str:
+    return paint(text, "1")
+
+
+def dim(text: str) -> str:
+    return paint(text, "2")
+
+
+def ok(text: str) -> str:
+    return paint("✓ ", "32") + text
+
+
+def fail(text: str) -> str:
+    return paint("✗ ", "31") + text
 
 
 def say(text: str = "") -> None:
     print(text, flush=True)
 
 
-def ask(question: str, options: list[str], default: int = 1) -> int:
-    """Показывает пронумерованные варианты; Enter выбирает вариант по умолчанию. Возвращает номер с 1."""
-    say(f"\n{question}")
+def banner() -> None:
+    title = f"  {t('title')}  "
+    line = "─" * len(title)
+    say(paint(f"╭{line}╮\n│{title}│\n╰{line}╯", "36"))
+    say(t("tagline"))
+
+
+def step(i: int, n: int, what: str) -> None:
+    say("\n" + bold(t("step", i=i, n=n, what=what)))
+
+
+def _read_key_posix(fd: int) -> str:
+    import select
+    data = os.read(fd, 1)
+    if data == b"\x1b":
+        if select.select([fd], [], [], 0.05)[0]:
+            data += os.read(fd, 8)
+        if data in (b"\x1b[A", b"\x1bOA"):
+            return "up"
+        if data in (b"\x1b[B", b"\x1bOB"):
+            return "down"
+        return "esc"
+    if data in (b"\r", b"\n"):
+        return "enter"
+    if data == b"\x03":
+        raise KeyboardInterrupt()
+    return data.decode(errors="ignore")
+
+
+def _read_key_windows() -> str:
+    import msvcrt
+    char = msvcrt.getwch()
+    if char in ("\x00", "\xe0"):
+        code = msvcrt.getwch()
+        return {"H": "up", "P": "down"}.get(code, "")
+    if char == "\r":
+        return "enter"
+    if char == "\x03":
+        raise KeyboardInterrupt()
+    if char == "\x1b":
+        return "esc"
+    return char
+
+
+def _ask_arrows(options: list[str], default: int) -> int:
+    selected = default - 1
+
+    def draw(first: bool) -> None:
+        if not first:
+            sys.stdout.write(f"\x1b[{len(options) + 1}F")
+        for index, option in enumerate(options):
+            prefix = f"{index + 1}) "
+            line = paint(f"› {prefix}{option}", "1;36") if index == selected else f"  {prefix}{option}"
+            sys.stdout.write("\x1b[2K" + line + "\n")
+        sys.stdout.write("\x1b[2K" + dim(t("hint_arrows")) + "\n")
+        sys.stdout.flush()
+
+    sys.stdout.write("\x1b[?25l")
+    draw(True)
+    windows = platform.system() == "Windows"
+    if not windows:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+    try:
+        while True:
+            key = _read_key_windows() if windows else _read_key_posix(fd)
+            if key == "up":
+                selected = (selected - 1) % len(options)
+            elif key == "down":
+                selected = (selected + 1) % len(options)
+            elif key == "enter":
+                return selected + 1
+            elif key.isdigit() and 1 <= int(key) <= len(options):
+                selected = int(key) - 1
+                draw(False)
+                return selected + 1
+            else:
+                continue
+            draw(False)
+    finally:
+        if not windows:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\x1b[?25h")
+        sys.stdout.flush()
+
+
+def _ask_numbers(options: list[str], default: int) -> int:
     for number, option in enumerate(options, 1):
         mark = "  ← Enter" if number == default else ""
         say(f"  {number}) {option}{mark}")
+    say(dim(t("hint_numbers")))
     while True:
-        try:
-            answer = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            raise Cancelled()
+        answer = input("> ").strip()
         if not answer:
             return default
         if answer.isdigit() and 1 <= int(answer) <= len(options):
             return int(answer)
-        say(f"Введите число от 1 до {len(options)} или просто Enter.")
+        say(t("bad_number", n=len(options)))
+
+
+def ask(question: str, options: list[str], default: int = 1) -> int:
+    """Shows options; arrows or a digit pick one, Enter confirms. Returns a 1-based index."""
+    say("\n" + bold(question))
+    try:
+        if INTERACTIVE:
+            return _ask_arrows(options, default)
+        return _ask_numbers(options, default)
+    except (EOFError, KeyboardInterrupt):
+        raise Cancelled()
 
 
 def yes_no(question: str, default_yes: bool = True) -> bool:
-    return ask(question, ["Да", "Нет"], 1 if default_yes else 2) == 1
+    return ask(question, [t("yes"), t("no")], 1 if default_yes else 2) == 1
 
 
-def run_cmd(command: list[str], **kwargs) -> subprocess.CompletedProcess | None:
-    say("$ " + " ".join(str(part) for part in command))
-    if DRY_RUN:
-        return None
-    return subprocess.run(command, check=True, **kwargs)
-
-
-# ───────────────────────────── система ─────────────────────────────
+# ───────────────────────────── system ─────────────────────────────
 
 def ram_gb() -> float | None:
     try:
@@ -149,16 +556,29 @@ def free_gb() -> float:
     return shutil.disk_usage(target).free / 2**30
 
 
-def llama_platform() -> str:
+def _arch() -> tuple[str, bool]:
     system, machine = platform.system(), platform.machine().lower()
-    arm = machine in {"arm64", "aarch64"}
-    if system == "Darwin":
-        return "macos-arm64" if arm else "macos-x64"
-    if system == "Linux":
-        return "ubuntu-arm64" if arm else "ubuntu-x64"
-    if system == "Windows":
-        return "win-cpu-arm64" if arm else "win-cpu-x64"
-    raise RuntimeError(f"Платформа {system} не поддерживается.")
+    return system, machine in {"arm64", "aarch64"}
+
+
+def llama_platform() -> str:
+    system, arm = _arch()
+    names = {"Darwin": "macos", "Linux": "ubuntu", "Windows": "win-cpu"}
+    if system not in names:
+        raise RuntimeError(t("unsupported_platform", system=system, machine=platform.machine()))
+    return f"{names[system]}-{'arm64' if arm else 'x64'}"
+
+
+def opencode_platform() -> str:
+    system, arm = _arch()
+    names = {"Darwin": "darwin", "Linux": "linux", "Windows": "windows"}
+    if system not in names:
+        raise RuntimeError(t("unsupported_platform", system=system, machine=platform.machine()))
+    return f"{names[system]}-{'arm64' if arm else 'x64'}"
+
+
+def exe(name: str) -> str:
+    return name + ".exe" if platform.system() == "Windows" else name
 
 
 def port_is_free(port: int) -> bool:
@@ -174,14 +594,14 @@ def pick_port(preferred: int) -> int:
     for port in range(preferred, preferred + 50):
         if port_is_free(port):
             return port
-    raise RuntimeError("Не нашёл свободный порт рядом с 8080.")
+    raise RuntimeError(t("no_free_port"))
 
 
 def pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
     if platform.system() == "Windows":
-        # os.kill(pid, 0) на Windows убивает процесс, поэтому спрашиваем tasklist.
+        # os.kill(pid, 0) on Windows terminates the process, so ask tasklist instead.
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
         return str(pid) in out
     try:
@@ -191,14 +611,23 @@ def pid_alive(pid: int | None) -> bool:
         return False
 
 
-# ───────────────────────────── состояние ─────────────────────────────
+def open_folder(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.run(["open", str(path)])
+    elif system == "Windows":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.run(["xdg-open", str(path)], stderr=subprocess.DEVNULL)
+
+
+# ───────────────────────────── state ─────────────────────────────
 
 def read_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
@@ -209,29 +638,126 @@ def write_state(state: dict) -> None:
     tmp.replace(STATE_FILE)
 
 
-# ───────────────────────────── llama.cpp ─────────────────────────────
-
-def server_binary() -> Path | None:
-    name = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
-    path = BIN_DIR / name
-    return path if path.exists() else None
+def saved_profile() -> Profile | None:
+    return PROFILES.get(read_state().get("profile", ""))
 
 
-def download(url: str, target: Path) -> None:
-    say(f"Скачиваю {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": "local-ai-starter"})
-    with urllib.request.urlopen(request, timeout=60) as response, target.open("wb") as out:
-        total = int(response.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
+# ───────────────────────────── network ─────────────────────────────
+
+def _net_reason(error: BaseException, sec: int = NET_CHECK_TIMEOUT) -> str:
+    """Turns a network exception into a human sentence."""
+    reason = getattr(error, "reason", error)
+    if isinstance(error, urllib.error.HTTPError):
+        return t("net_reason.http", code=error.code)
+    if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in str(reason):
+        return t("net_reason.timeout", sec=sec)
+    if isinstance(reason, socket.gaierror):
+        return t("net_reason.dns")
+    if isinstance(reason, ssl.SSLError):
+        return t("net_reason.ssl")
+    if isinstance(reason, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
+        return t("net_reason.refused")
+    return t("net_reason.other", detail=str(reason))
+
+
+def network_error(url: str, error: BaseException, sec: int = NET_CHECK_TIMEOUT) -> NetworkError:
+    host = urllib.parse.urlparse(getattr(error, "url", None) or url).hostname or url
+    if isinstance(error, urllib.error.HTTPError) and error.code in (404, 410):
+        return NetworkError(t("net_missing", host=host, url=url))
+    return NetworkError(f"{t('net_fail_title', host=host)}\n{_net_reason(error, sec)}\n{t('net_advice')}")
+
+
+def _open(url: str, offset: int = 0, timeout: int = STALL_TIMEOUT):
+    headers = {"User-Agent": "local-ai-starter"}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+
+
+def check_network(urls: list[str]) -> None:
+    """Fetches the first byte of every pending download (redirects and CDNs included)."""
+    if DRY_RUN or not urls:
+        return
+    say(dim(t("net_check")))
+    for url in urls:
+        host = urllib.parse.urlparse(url).hostname
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "local-ai-starter", "Range": "bytes=0-0"})
+            with urllib.request.urlopen(request, timeout=NET_CHECK_TIMEOUT) as response:
+                response.read(1)
+        except (urllib.error.URLError, OSError) as error:
+            raise network_error(url, error) from None
+        say("  " + ok(t("net_ok", host=host)))
+
+
+def _progress(done: int, total: int, started: float, base: int) -> None:
+    elapsed = max(time.time() - started, 0.001)
+    speed = (done - base) / elapsed
+    if not total:
+        print(f"\r  {done / 2**20:8.1f} {t('mb')}  {speed / 2**20:5.1f} {t('mbs')}", end="", flush=True)
+        return
+    share = done / total
+    width = 24
+    filled = int(width * share)
+    bar = ("█" * filled + "░" * (width - filled)) if ANSI else ("#" * filled + "-" * (width - filled))
+    left = (total - done) / speed if speed > 0 else 0
+    eta = f"{int(left // 60)}:{int(left % 60):02d}" if speed > 0 else "--:--"
+    if total > 2**30:
+        size = f"{done / 2**30:.2f}/{total / 2**30:.2f} {t('gb')}"
+    else:
+        size = f"{done / 2**20:.0f}/{total / 2**20:.0f} {t('mb')}"
+    print(f"\r  {bar} {share * 100:5.1f}%  {size}  {speed / 2**20:5.1f} {t('mbs')}  {t('eta')} {eta} ",
+          end="", flush=True)
+
+
+def download(url: str, target: Path, sha256: str, name: str) -> None:
+    """Resumable download into target.part, verified, then renamed to target."""
+    say(t("downloading", name=name))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    attempt = 0
+    while True:
+        offset = part.stat().st_size if part.exists() else 0
+        try:
+            with _open(url, offset) as response:
+                if offset and response.status != 206:
+                    offset = 0  # server ignored Range: start over
+                length = int(response.headers.get("Content-Length") or 0)
+                total = offset + length if length else 0
+                done, started, drawn = offset, time.time(), 0.0
+                with part.open("ab" if offset else "wb") as out:
+                    while True:
+                        chunk = response.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        done += len(chunk)
+                        attempt = 0  # progress resets the retry budget
+                        if time.time() - drawn > 0.3 or done == total:
+                            drawn = time.time()
+                            _progress(done, total, started, offset)
+            say("")
+            if total and done < total:
+                raise ConnectionResetError("incomplete")
+            break
+        except urllib.error.HTTPError as error:
+            if error.code == 416 and offset:  # already complete
                 break
-            out.write(chunk)
-            done += len(chunk)
-            if total:
-                print(f"\r  {done / 2**20:6.1f} / {total / 2**20:.1f} МБ ({done * 100 // total}%)", end="", flush=True)
-    say("")
+            raise network_error(url, error) from None
+        except (urllib.error.URLError, OSError) as error:
+            say("")
+            attempt += 1
+            if attempt >= DOWNLOAD_ATTEMPTS:
+                raise network_error(url, error, STALL_TIMEOUT) from None
+            pause = min(5 * attempt, 20)
+            say(dim(t("download_retry", reason=_net_reason(error, STALL_TIMEOUT), sec=pause, i=attempt + 1, n=DOWNLOAD_ATTEMPTS)))
+            time.sleep(pause)
+    say(dim(t("verifying")))
+    if sha256_of(part) != sha256:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(t("hash_bad", name=name))
+    part.replace(target)
+    say(ok(t("hash_ok")))
 
 
 def sha256_of(path: Path) -> str:
@@ -243,33 +769,39 @@ def sha256_of(path: Path) -> str:
 
 
 def extract(archive: Path, target: Path) -> None:
-    """Распаковывает архив в target, убирая общую верхнюю папку, с защитой от выхода за пределы target."""
+    """Unpacks into target, dropping a shared top folder and refusing paths outside target.
+
+    Symlinks matter: llama.cpp tarballs link libX.0.dylib -> libX.0.9.0.dylib, and the
+    server does not start without them.
+    """
     target.mkdir(parents=True, exist_ok=True)
     if archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
-            names = [(m.filename, m) for m in zf.infolist() if not m.is_dir()]
-            opener = lambda m: zf.open(m)
-            _write_members(names, opener, target)
+            files = [(m.filename, m) for m in zf.infolist() if not m.is_dir()]
+            _write_members(files, [], lambda m: zf.open(m), target)
     else:
         with tarfile.open(archive) as tf:
-            names = [(m.name, m) for m in tf.getmembers() if m.isfile()]
-            opener = lambda m: tf.extractfile(m)
-            _write_members(names, opener, target)
-    # tar хранит режим доступа, zip — нет; llama-server на POSIX обязан быть исполняемым
-    if platform.system() != "Windows":
-        for path in target.iterdir():
-            if path.is_file() and path.name.startswith("llama"):
-                path.chmod(path.stat().st_mode | 0o111)
+            members = tf.getmembers()
+            files = [(m.name, m) for m in members if m.isfile()]
+            links = [(m.name, m.linkname) for m in members if m.issym()]
+            _write_members(files, links, lambda m: tf.extractfile(m), target)
 
 
-def _write_members(items, opener, target: Path) -> None:
-    firsts = {name.split("/")[0] for name, _ in items}
-    strip = len(firsts) == 1 and all("/" in name for name, _ in items)
-    for name, member in items:
+def _write_members(files, links, opener, target: Path) -> None:
+    names = [name for name, _ in files] + [name for name, _ in links]
+    firsts = {name.split("/")[0] for name in names}
+    strip = len(firsts) == 1 and all("/" in name for name in names)
+    root = target.resolve()
+
+    def destination_of(name: str) -> Path:
         relative = Path(*name.split("/")[1:]) if strip else Path(name)
         destination = (target / relative).resolve()
-        if target.resolve() not in destination.parents:
-            raise RuntimeError(f"Небезопасный путь в архиве: {name}")
+        if root not in destination.parents:
+            raise RuntimeError(f"Unsafe path in archive: {name}")
+        return destination
+
+    for name, member in files:
+        destination = destination_of(name)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with opener(member) as source, destination.open("wb") as out:
             shutil.copyfileobj(source, out)
@@ -279,33 +811,88 @@ def _write_members(items, opener, target: Path) -> None:
                 destination.chmod(mode & 0o777)
         except OSError:
             pass
+    for name, link in links:
+        destination = destination_of(name)
+        if root not in (destination.parent / link).resolve().parents:
+            raise RuntimeError(f"Unsafe link in archive: {name} -> {link}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_symlink() or destination.exists():
+            destination.unlink()
+        os.symlink(link, destination)
+
+
+def make_executable(path: Path) -> None:
+    if platform.system() != "Windows" and path.exists():
+        path.chmod(path.stat().st_mode | 0o111)  # zip archives do not keep the exec bit
+
+
+# ───────────────────────────── components ─────────────────────────────
+
+def server_binary() -> Path | None:
+    path = BIN_DIR / exe("llama-server")
+    return path if path.exists() else None
+
+
+def opencode_binary() -> Path | None:
+    path = OPENCODE_DIR / exe("opencode")
+    return path if path.exists() else None
+
+
+def llama_asset() -> tuple[str, str]:
+    plat = llama_platform()
+    ext = "zip" if plat.startswith("win") else "tar.gz"
+    return LLAMA_URL.format(build=LLAMA_BUILD, plat=plat, ext=ext), plat
+
+
+def opencode_asset() -> tuple[str, str]:
+    plat = opencode_platform()
+    ext = "tar.gz" if plat.startswith("linux") else "zip"
+    return OPENCODE_URL.format(ver=OPENCODE_VERSION, plat=plat, ext=ext), plat
+
+
+def _install_archive(url: str, sha256: str, target: Path, name: str) -> None:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    archive = ROOT / ("download-" + url.rsplit("/", 1)[-1])
+    download(url, archive, sha256, name)
+    say(dim(t("extracting")))
+    if target.exists():
+        shutil.rmtree(target)
+    extract(archive, target)
+    archive.unlink(missing_ok=True)
 
 
 def install_llama() -> None:
-    if server_binary():
-        return
-    plat = llama_platform()
-    ext = "zip" if plat.startswith("win") else "tar.gz"
-    url = LLAMA_URL.format(build=LLAMA_BUILD, plat=plat, ext=ext)
+    url, plat = llama_asset()
     if DRY_RUN:
-        say(f"[dry-run] скачал бы {url} в {BIN_DIR}")
+        say(t("dry_run_would", what=f"download {url} → {BIN_DIR}"))
         return
-    ROOT.mkdir(parents=True, exist_ok=True)
-    archive = ROOT / f"llama.{ext}"
-    download(url, archive)
-    if sha256_of(archive) != LLAMA_SHA256[plat]:
-        archive.unlink(missing_ok=True)
-        raise RuntimeError("Контрольная сумма архива llama.cpp не совпала — файл удалён. Повторите попытку.")
-    say("Контрольная сумма совпала. Распаковываю…")
-    if BIN_DIR.exists():
-        shutil.rmtree(BIN_DIR)
-    extract(archive, BIN_DIR)
-    archive.unlink(missing_ok=True)
+    _install_archive(url, LLAMA_SHA256[plat], BIN_DIR, f"llama.cpp {LLAMA_BUILD}")
+    for path in BIN_DIR.iterdir():
+        if path.is_file() and path.name.startswith("llama"):
+            make_executable(path)
     if not server_binary():
-        raise RuntimeError("В архиве нет llama-server — возможно, сборка изменила состав.")
+        raise RuntimeError(t("no_server_binary"))
 
 
-# ───────────────────────────── сервер ─────────────────────────────
+def install_opencode() -> None:
+    url, plat = opencode_asset()
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"download {url} → {OPENCODE_DIR}"))
+        return
+    _install_archive(url, OPENCODE_SHA256[plat], OPENCODE_DIR, f"OpenCode {OPENCODE_VERSION}")
+    make_executable(OPENCODE_DIR / exe("opencode"))
+    if not opencode_binary():
+        raise RuntimeError(t("no_opencode_binary"))
+
+
+def install_model(profile: Profile) -> None:
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"download {profile.url} → {profile.path}"))
+        return
+    download(profile.url, profile.path, profile.sha256, profile.file)
+
+
+# ───────────────────────────── server ─────────────────────────────
 
 def http_json(url: str, payload: dict | None = None, timeout: int = 10):
     data = json.dumps(payload).encode() if payload is not None else None
@@ -329,27 +916,36 @@ def log_tail() -> str:
         return ""
 
 
+def context_size() -> int:
+    """OpenCode's system prompt and tools take ~10k tokens, so 32k is the comfortable minimum."""
+    ram = ram_gb()
+    return 16384 if ram and ram < 12 else 32768
+
+
+def server_command(profile: Profile, port: int, ctx: int) -> list[str]:
+    binary = server_binary() or BIN_DIR / exe("llama-server")
+    return [str(binary), "-m", str(profile.path), "--alias", profile.key, "-c", str(ctx),
+            "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--jinja",
+            "--host", "127.0.0.1", "--port", str(port)]
+
+
 def start_server(profile: Profile, port: int) -> dict:
-    binary = server_binary()
+    ctx = context_size()
+    command = server_command(profile, port, ctx)
+    state = read_state()
     if DRY_RUN:
-        say(f"[dry-run] запустил бы llama-server -hf {profile.hf_model} -c {profile.context} --jinja --port {port}")
-        return {"pid": 0, "port": port, "profile": profile.key}
-    if not binary:
-        raise RuntimeError("Движок не установлен.")
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    command = [str(binary), "-hf", profile.hf_model, "--alias", profile.key, "-c", str(profile.context),
-               "--jinja", "--host", "127.0.0.1", "--port", str(port)]
-    env = dict(os.environ, LLAMA_CACHE=str(MODELS_DIR))
+        say(t("dry_run_would", what="run " + " ".join(command)))
+        return {"pid": 0, "port": port, "profile": profile.key, "ctx": ctx}
     options: dict = {}
     if platform.system() == "Windows":
         options["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
     with LOG_FILE.open("ab") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env,
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                    cwd=str(BIN_DIR), **options)
-    state = read_state()
-    state.update({"pid": process.pid, "port": port, "profile": profile.key, "started_at": int(time.time())})
+    state.update({"pid": process.pid, "port": port, "profile": profile.key, "ctx": ctx,
+                  "started_at": int(time.time())})
     write_state(state)
     return state
 
@@ -357,29 +953,28 @@ def start_server(profile: Profile, port: int) -> dict:
 def wait_ready(state: dict) -> None:
     if DRY_RUN:
         return
-    say("\nЗапускаю модель. При первом запуске она скачивается — это самый долгий шаг.")
-    started = time.time()
-    last_note = 0.0
-    while time.time() - started < 3600:
+    say(dim(t("starting_server")))
+    started, last_note, limit = time.time(), 0.0, 900
+    while time.time() - started < limit:
         if is_healthy(state["port"]):
             break
         if not pid_alive(state["pid"]):
-            raise RuntimeError(f"Сервер остановился. Последняя строка журнала: {log_tail()}\nПолный журнал: {LOG_FILE}")
+            raise RuntimeError(t("server_stopped", line=log_tail(), log=LOG_FILE))
         if time.time() - last_note > 10:
             last_note = time.time()
-            say(f"  [{int(time.time() - started)} с] {log_tail()}")
-        time.sleep(2)
+            say(dim(f"  [{int(time.time() - started)} s] {log_tail()}"))
+        time.sleep(1)
     else:
-        raise RuntimeError("Сервер не запустился за час. Смотрите журнал: " + str(LOG_FILE))
-    say("Сервер отвечает. Проверяю пробным вопросом…")
+        raise RuntimeError(t("server_timeout", min=limit // 60, log=LOG_FILE))
+    say(dim(t("server_test")))
     status, body = http_json(
         f"http://127.0.0.1:{state['port']}/v1/chat/completions",
         {"model": state["profile"], "messages": [{"role": "user", "content": "Say OK"}], "max_tokens": 16},
         timeout=300,
     )
     if status != 200 or not body.get("choices"):
-        raise RuntimeError("Сервер запущен, но не отвечает на вопросы. Смотрите журнал: " + str(LOG_FILE))
-    say("Модель отвечает. Всё работает.")
+        raise RuntimeError(t("server_no_answer", log=LOG_FILE))
+    say(ok(t("server_ok")))
 
 
 def running_state() -> dict | None:
@@ -393,7 +988,7 @@ def stop_server() -> None:
     state = read_state()
     pid = state.get("pid")
     if pid and pid_alive(pid):
-        say(f"Останавливаю сервер (PID {pid}).")
+        say(t("stopping", pid=pid))
         if platform.system() == "Windows":
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         else:
@@ -406,232 +1001,263 @@ def stop_server() -> None:
                 break
             time.sleep(0.5)
     else:
-        say("Запущенного сервера нет.")
+        say(t("no_server"))
     state.pop("pid", None)
     if STATE_FILE.exists():
         write_state(state)
 
 
-# ───────────────────────────── OpenCode ─────────────────────────────
-
-def find_opencode() -> Path | None:
-    local = OPENCODE_HOME / ".opencode" / "bin" / "opencode"
-    if local.exists():
-        return local
-    found = shutil.which("opencode")
-    return Path(found) if found else None
-
-
-def install_opencode() -> Path | None:
-    existing = find_opencode()
-    if existing:
-        return existing
-    if platform.system() == "Windows":
-        say("OpenCode на Windows этот мастер не ставит. Установите его по инструкции https://opencode.ai/docs "
-            "(рекомендуется WSL), затем запустите мастер снова — конфигурация проекта уже будет готова.")
-        return None
-    if DRY_RUN:
-        say(f"[dry-run] установил бы OpenCode в {OPENCODE_HOME}")
-        return None
-    OPENCODE_HOME.mkdir(parents=True, exist_ok=True)
-    script = ROOT / "install-opencode.sh"
-    download(OPENCODE_INSTALL_URL, script)
-    # Установщик пишет в $HOME/.opencode/bin; подменяем HOME, чтобы всё осталось в нашей папке.
-    run_cmd(["bash", str(script), "--no-modify-path"], env=dict(os.environ, HOME=str(OPENCODE_HOME)))
-    script.unlink(missing_ok=True)
-    return find_opencode()
-
-
-DEMO_HTML = """<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><title>Учебная страница</title></head>
-<body><h1>Привет!</h1><p>Попросите помощника: «измени заголовок и добавь переключатель темы».</p></body></html>
-"""
-
-
-def setup_demo_project(profile: Profile, port: int) -> Path:
-    DEMO_DIR.mkdir(parents=True, exist_ok=True)
-    (DEMO_DIR / "index.html").write_text(DEMO_HTML, encoding="utf-8")
-    config = {
-        "$schema": "https://opencode.ai/config.json",
-        "provider": {"local-ai-starter": {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "Local AI Starter (llama.cpp)",
-            "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
-            "models": {profile.key: {"name": f"{profile.title} (локально)",
-                                     "limit": {"context": profile.context, "output": 4096}}},
-        }},
-        "model": f"local-ai-starter/{profile.key}",
-    }
-    path = DEMO_DIR / "opencode.json"
-    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path
-
-
-# ───────────────────────────── сценарии ─────────────────────────────
-
-def choose_profile(purpose_code: bool) -> Profile:
-    ram = ram_gb()
-    free = free_gb()
-    say("\nПроверка компьютера")
-    say(f"  Система: {platform.system()} {platform.machine()}")
-    say(f"  Память: {f'{ram:.0f} ГБ' if ram else 'не удалось определить'}")
-    say(f"  Свободно на диске: {free:.0f} ГБ")
-    if purpose_code:
-        recommended = PROFILES["code"] if (ram or 16) >= 16 else PROFILES["fast"]
-    else:
-        recommended = PROFILES["general"] if (ram or 16) >= 12 else PROFILES["fast"]
-    others = [p for p in PROFILES.values() if p is not recommended and (purpose_code or p.key != "code")]
-    options = [f"{recommended.title} — {recommended.purpose} (загрузка {recommended.download}) — рекомендую"]
-    options += [f"{p.title} — {p.purpose} (загрузка {p.download})" for p in others]
-    choice = ask("Какую модель берём?", options, 1)
-    profile = recommended if choice == 1 else others[choice - 2]
-    if ram and ram < profile.min_ram_gb:
-        say(f"\nВнимание: для этой модели желательно от {profile.min_ram_gb} ГБ памяти, у вас {ram:.0f} ГБ. "
-            "Может работать медленно.")
-        if not yes_no("Всё равно продолжить?", False):
-            raise Cancelled()
-    if free < 12:
-        say(f"\nСвободного места мало ({free:.0f} ГБ). Нужно ещё несколько гигабайт для модели.")
-        if not yes_no("Продолжить?", False):
-            raise Cancelled()
-    return profile
-
-
 def bring_up(profile: Profile) -> dict:
     existing = running_state()
     if existing and existing.get("profile") == profile.key and is_healthy(existing["port"]):
-        say("Сервер уже работает.")
+        say(ok(t("server_running")))
         return existing
     if existing:
         stop_server()
     port = pick_port(DEFAULT_PORT)
     if port != DEFAULT_PORT:
-        say(f"Порт {DEFAULT_PORT} занят, использую {port}.")
+        say(t("port_busy", busy=DEFAULT_PORT, port=port))
     state = start_server(profile, port)
     wait_ready(state)
     return state
 
 
+# ───────────────────────────── OpenCode ─────────────────────────────
+
+def write_opencode_config(profile: Profile, port: int, ctx: int) -> None:
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "autoupdate": False,
+        "share": "disabled",
+        "provider": {"local-ai-starter": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Local AI Starter (llama.cpp)",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+            "models": {profile.key: {"name": f"{profile.key} (local)", "tool_call": True,
+                                     "limit": {"context": ctx, "output": 4096}}},
+        }},
+        "model": f"local-ai-starter/{profile.key}",
+        "small_model": f"local-ai-starter/{profile.key}",
+    }
+    ROOT.mkdir(parents=True, exist_ok=True)
+    OPENCODE_CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def prepare_workspace() -> None:
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    if any(WORKSPACE_DIR.iterdir()):
+        return  # never overwrite the user's files
+    html = (f'<!doctype html>\n<html lang="{LANG}"><head><meta charset="utf-8"><title>{t("demo_title")}</title></head>\n'
+            f'<body><h1>{t("demo_heading")}</h1><p>{t("demo_text")}</p></body></html>\n')
+    (WORKSPACE_DIR / "index.html").write_text(html, encoding="utf-8")
+
+
+def opencode_env() -> dict:
+    """Points OpenCode at our config and keeps its data, auth and caches inside local-ai/."""
+    env = dict(os.environ, OPENCODE_CONFIG=str(OPENCODE_CONFIG), OPENCODE_DISABLE_AUTOUPDATE="1")
+    for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
+                      ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")):
+        path = OPENCODE_HOME / sub
+        path.mkdir(parents=True, exist_ok=True)
+        env[name] = str(path)
+    return env
+
+
+def launch_opencode(profile: Profile, state: dict) -> None:
+    write_opencode_config(profile, state["port"], state.get("ctx", context_size()))
+    prepare_workspace()
+    say("\n" + bold(t("opencode_intro", dir=WORKSPACE_DIR)))
+    say(t("opencode_tips", example=t("opencode_example")))
+    binary = opencode_binary()
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"run {OPENCODE_DIR / exe('opencode')} in {WORKSPACE_DIR}"))
+        return
+    if not binary:
+        raise RuntimeError(t("opencode_missing"))
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C belongs to OpenCode now
+    try:
+        subprocess.run([str(binary)], cwd=str(WORKSPACE_DIR), env=opencode_env())
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+# ───────────────────────────── scenarios ─────────────────────────────
+
+def show_system() -> float | None:
+    ram = ram_gb()
+    say("\n" + bold(t("system_check")))
+    say(f"  {t('system')}: {platform.system()} {platform.machine()}")
+    memory = f"{ram:.0f} {t('gb')}" if ram else t("unknown")
+    say(f"  {t('memory')}: {memory}")
+    say(f"  {t('disk_free')}: {free_gb():.0f} {t('gb')}")
+    return ram
+
+
+def choose_profile() -> Profile:
+    ram = show_system()
+    recommended = PROFILES["qwen3-8b"] if (ram or 16) >= 12 else PROFILES["qwen3-4b"]
+    ordered = [recommended] + [p for p in PROFILES.values() if p is not recommended]
+    options = []
+    for profile in ordered:
+        label = f"{t('model.' + profile.key)} · {size_text(profile.size / 2**30)}"
+        if profile.path.exists():
+            label += " ✓"
+        if profile is recommended:
+            label += f" ({t('recommended')})"
+        options.append(label)
+    profile = ordered[ask(t("pick_model"), options, 1) - 1]
+    if ram and ram < profile.min_ram_gb:
+        say(t("low_ram", need=profile.min_ram_gb, have=ram))
+        if not yes_no(t("continue_anyway"), False):
+            raise Cancelled()
+    return profile
+
+
+def ensure_installed(profile: Profile | None) -> Profile:
+    """Asks only what is still unknown, installs only what is still missing."""
+    if profile is None:
+        profile = choose_profile()
+    tasks = []
+    if not server_binary() or DRY_RUN:
+        tasks.append((t("plan_engine", build=LLAMA_BUILD), LLAMA_SIZE_MB / 1024, llama_asset()[0], install_llama))
+    if not profile.path.exists() or DRY_RUN:
+        tasks.append((t("plan_model", file=f"{profile.family}/{profile.file}"), profile.size / 2**30,
+                      profile.url, lambda: install_model(profile)))
+    if not opencode_binary() or DRY_RUN:
+        tasks.append((t("plan_opencode", ver=OPENCODE_VERSION), OPENCODE_SIZE_MB / 1024,
+                      opencode_asset()[0], install_opencode))
+    if tasks:
+        total = sum(size for _, size, _, _ in tasks)
+        say("\n" + bold(t("plan")))
+        for index, (title, size, _, _) in enumerate(tasks, 1):
+            say(f"  {index}. {title} · {size_text(size)}")
+        say(dim("  " + t("plan_total", gb=total, root=ROOT)))
+        if free_gb() < total + 1:
+            say(fail(t("low_disk", need=total + 1, have=free_gb())))
+            if not yes_no(t("continue_anyway"), False):
+                raise Cancelled()
+        if not yes_no(t("start"), True):
+            raise Cancelled()
+        check_network([url for _, _, url, _ in tasks])
+        for index, (title, _, _, action) in enumerate(tasks, 1):
+            step(index, len(tasks), title)
+            action()
+    state = read_state()
+    state["profile"] = profile.key
+    write_state(state)
+    return profile
+
+
 def open_chat(port: int) -> None:
     url = f"http://127.0.0.1:{port}"
-    say(f"\nЧат: {url}")
+    say(t("chat_url", url=url))
     if not DRY_RUN:
         webbrowser.open(url)
 
 
-def launch_opencode(profile: Profile, port: int, binary: Path | None) -> None:
-    path = setup_demo_project(profile, port)
-    say(f"\nУчебный проект готов: {DEMO_DIR}")
-    if not binary:
-        say("OpenCode не найден — после установки выполните в этой папке команду opencode.")
-        return
-    say("OpenCode спросит подтверждение перед изменением файлов — это нормально, не отключайте его.")
-    say("Попробуйте задачу: «измени заголовок на index.html и добавь переключатель темы».")
-    if DRY_RUN or not yes_no("Открыть OpenCode прямо сейчас в этом окне?", True):
-        say(f'Позже: cd "{DEMO_DIR}" && "{binary}"')
-        return
-    subprocess.run([str(binary)], cwd=str(DEMO_DIR))
-
-
-def first_run() -> None:
-    say("Local AI Starter — локальный ИИ на вашем компьютере.")
-    say("Всё скачивается в папку рядом со скриптом, наружу ничего не открывается.")
-    purpose = ask("Для чего вам помощник?", ["Чат и тексты", "Программирование в OpenCode"], 1)
-    code = purpose == 2
-    profile = choose_profile(code)
-    plat = llama_platform()
-    say(f"\nПлан:\n  1. Скачать движок llama.cpp {LLAMA_BUILD} ({plat}) в {BIN_DIR}\n"
-        f"  2. Скачать модель «{profile.title}» ({profile.download}) в {MODELS_DIR}\n"
-        + ("  3. Поставить OpenCode и создать учебный проект\n" if code else ""))
-    if not yes_no("Начинаем?", True):
-        raise Cancelled()
-    install_llama()
-    binary = install_opencode() if code else None
-    state = bring_up(profile)
-    if code:
-        launch_opencode(profile, state["port"], binary)
-    else:
-        open_chat(state["port"])
-
-
 def show_status() -> None:
-    state = read_state()
-    say(f"\nПапка данных: {ROOT}")
-    say(f"Движок: {'установлен' if server_binary() else 'не установлен'}")
     alive = running_state()
-    say(f"Сервер: {'работает, порт ' + str(alive['port']) if alive else 'не запущен'}")
-    say(f"Профиль: {state.get('profile', '—')}")
-    say(f"Журнал: {LOG_FILE}")
+    profile = saved_profile()
+    say(f"\n{t('status_root')}: {ROOT}")
+    say(f"{t('status_engine')}: {t('installed') if server_binary() else t('not_installed')} ({LLAMA_BUILD})")
+    say(f"{t('status_opencode')}: {t('installed') if opencode_binary() else t('not_installed')} ({OPENCODE_VERSION})")
+    say(f"{t('status_server')}: {t('running_on', port=alive['port']) if alive else t('not_running')}")
+    say(f"{t('status_model')}: {profile.path if profile else '—'}")
+    say(f"{t('status_log')}: {LOG_FILE}")
     if LOG_FILE.exists():
-        say("Последняя строка: " + log_tail())
+        say(f"{t('status_last')}: {log_tail()}")
 
 
-def uninstall() -> None:
-    say(f"\nБудет удалена папка {ROOT} целиком: движок, модели и учебный проект.")
-    if not yes_no("Удалить всё?", False):
-        return
+def manage_models() -> None:
+    while True:
+        files = sorted(MODELS_DIR.glob("*/*.gguf")) if MODELS_DIR.exists() else []
+        say("\n" + bold(t("models_title", dir=MODELS_DIR)))
+        if not files:
+            say("  " + t("models_none"))
+            return
+        total = 0
+        for path in files:
+            size = path.stat().st_size
+            total += size
+            say(f"  {path.parent.name}/{path.name}  {size_text(size / 2**30)}")
+        say(dim("  " + t("models_total", gb=total / 2**30)))
+        options = [t("models_back"), t("models_open")] + [f"{p.parent.name}/{p.name}" for p in files]
+        choice = ask(t("models_pick"), options, 1)
+        if choice == 1:
+            return
+        if choice == 2:
+            open_folder(MODELS_DIR)
+            continue
+        path = files[choice - 3]
+        alive = running_state()
+        current = saved_profile()
+        if alive and current and current.path == path:
+            stop_server()
+        path.unlink(missing_ok=True)
+        if path.parent.exists() and not any(path.parent.iterdir()):
+            path.parent.rmdir()
+        say(ok(t("models_deleted", file=path.name)))
+
+
+def uninstall() -> bool:
+    say("\n" + t("uninstall_warn", root=ROOT))
+    if not yes_no(t("uninstall_confirm"), False):
+        return False
     stop_server()
     shutil.rmtree(ROOT, ignore_errors=True)
-    say("Готово. В системе ничего больше не осталось.")
+    say(ok(t("uninstall_done")))
+    return True
 
 
-def menu() -> None:
-    state = read_state()
-    profile = PROFILES.get(state.get("profile", ""), PROFILES["general"])
+def run_opencode(profile: Profile) -> Profile:
+    profile = ensure_installed(profile)
+    state = bring_up(profile)
+    launch_opencode(profile, state)
+    return profile
+
+
+def menu(profile: Profile | None) -> None:
+    actions = ["stop_exit", "keep_exit", "opencode", "chat", "switch", "models", "status", "uninstall"]
     while True:
-        choice = ask("Local AI Starter", [
-            "Запустить и открыть чат",
-            "Остановить сервер",
-            "Выбрать другую модель",
-            "Учебный проект в OpenCode",
-            "Состояние и журнал",
-            "Удалить всё, что скачано",
-            "Выход",
-        ], 1)
-        if choice == 1:
-            state = bring_up(profile)
-            open_chat(state["port"])
-        elif choice == 2:
+        choice = actions[ask(t("menu_title"), [t("menu." + a) for a in actions], 1) - 1]
+        if choice == "stop_exit":
             stop_server()
-        elif choice == 3:
-            profile = choose_profile(False)
-            state = bring_up(profile)
-            open_chat(state["port"])
-        elif choice == 4:
-            code = PROFILES["code"]
-            binary = install_opencode()
-            state = bring_up(code)
-            launch_opencode(code, state["port"], binary)
-            profile = code
-        elif choice == 5:
+            return
+        if choice == "keep_exit":
+            return
+        if choice == "opencode":
+            profile = run_opencode(profile)
+        elif choice == "chat":
+            profile = ensure_installed(profile)
+            open_chat(bring_up(profile)["port"])
+        elif choice == "switch":
+            profile = run_opencode(choose_profile())
+        elif choice == "models":
+            manage_models()
+        elif choice == "status":
             show_status()
-        elif choice == 6:
-            uninstall()
-            if not ROOT.exists():
-                return
-        else:
+        elif choice == "uninstall" and uninstall():
             return
 
 
-def main() -> int:
+def main(argv: list[str]) -> int:
     try:
-        if server_binary() or DRY_RUN and STATE_FILE.exists():
-            menu()
-        else:
-            first_run()
-            if yes_no("Открыть меню управления (остановка, смена модели)?", False):
-                menu()
+        banner()
+        profile = saved_profile()
+        if "--menu" not in argv:
+            profile = run_opencode(profile)
+        menu(profile)
         return 0
-    except Cancelled:
-        say("\nОтменено.")
+    except (Cancelled, KeyboardInterrupt):
+        say("\n" + t("cancelled"))
         return 0
-    except KeyboardInterrupt:
-        say("\nОтменено.")
-        return 0
+    except NetworkError as error:
+        say("\n" + fail(str(error)))
+        return 1
     except (RuntimeError, subprocess.CalledProcessError, urllib.error.URLError, OSError) as error:
-        say(f"\nОшибка: {error}")
+        say("\n" + fail(t("error", error=error)))
         return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
