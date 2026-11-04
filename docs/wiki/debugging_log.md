@@ -9,9 +9,9 @@ Issues сущностей.
 (`libllama-common.0.dylib -> libllama-common.0.9.0.dylib`, 18 штук), а `extract` брал только
 обычные файлы (`m.isfile()`). Ошибка была и в первой версии мастера, просто её не запускали.
 Исправление: `_write_members` воссоздаёт symlink-и и проверяет, что цель не выходит за папку
-(`local_ai_starter.py:790`), см. [network](entities/network.md).
+(`local_ai_starter.py:883`), см. [network](entities/network.md).
 
 ## 2026-11-04 — HTTP 404 описывался как «ресурс заблокирован в сети»
 Причина: все `HTTPError` шли в общий текст с советом про VPN.
 Исправление: 404/410 — отдельное сообщение «закреплённой версии больше нет»
-(`local_ai_starter.py:663`).
+(`local_ai_starter.py:754`).

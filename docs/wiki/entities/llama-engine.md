@@ -3,21 +3,21 @@
 Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 
 ## Purpose
-Закреплённая сборка llama.cpp под текущую платформу: скачать, проверить, распаковать в `bin/`.
+Основной движок на всех системах: закреплённая сборка llama.cpp и модели GGUF.
 
 ## Key API
-- `LLAMA_BUILD`, `LLAMA_URL`, `LLAMA_SHA256` — `local_ai_starter.py:52-62`. Одна сборка для
+- `LLAMA_BUILD`, `LLAMA_URL`, `LLAMA_SHA256` — `local_ai_starter.py:57-67`. Одна сборка для
   всех, хеш для каждого из 6 ключей платформы.
-- `llama_platform()` — `local_ai_starter.py:564`: `macos-*`, `ubuntu-*`, `win-cpu-*` × `arm64|x64`.
-- `install_llama()` — `local_ai_starter.py:864`, через общий `_install_archive` (`:853`):
-  загрузка с докачкой и SHA-256 ([network](network.md)), пересоздание `bin/`, exec-бит файлам `llama*`.
-- `install_model(profile)` — `local_ai_starter.py:888`: GGUF качает сам мастер в
-  `models/<family>/`, а не `llama-server -hf` (у того своя нечитаемая раскладка кэша).
-- `server_binary()` — `local_ai_starter.py:831`.
+- `llama_platform()` — `local_ai_starter.py:655`: `macos-*`, `ubuntu-*`, `win-cpu-*` × `arm64|x64`.
+- `install_llama()` — `local_ai_starter.py:974`, через `_install_archive` (`:963`) в
+  `engines/llama.cpp/`: загрузка с докачкой и SHA-256 ([network](network.md)), exec-бит файлам `llama*`.
+- GGUF-модели скачивает сам мастер (`install_model`, `local_ai_starter.py:1034`) в
+  `models/gguf/<family>/`, а не `llama-server -hf`: у того своя нечитаемая раскладка кэша.
+- `server_binary()` — `local_ai_starter.py:928`.
 
 ## Collaborators
-- [server-lifecycle](server-lifecycle.md) — запуск `server_binary()`.
-- [network](network.md) — загрузка и распаковка.
+- [server-lifecycle](server-lifecycle.md) — запуск; [network](network.md) — загрузка и распаковка;
+  [mlx-engine](mlx-engine.md) — второй движок на Apple Silicon; [speed-test](speed-test.md).
 
 ## Known Issues
 - На Windows и Linux — CPU-сборки, GPU не настроен.

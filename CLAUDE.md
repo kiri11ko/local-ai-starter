@@ -5,9 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A single-file, stdlib-only Python wizard (`local_ai_starter.py`): one double-click
-(`RunMe.command` / `RunMe.sh` / `RunMe.bat`) downloads a pinned llama.cpp build, a Qwen GGUF
-model and a pinned OpenCode CLI, starts `llama-server` on `127.0.0.1`, and opens OpenCode in the
-same terminal in `local-ai/workspace`. Target users are non-technical: arrow-key menus,
+(`RunMe.command` / `RunMe.sh` / `RunMe.bat`) downloads an engine, a Qwen model and a pinned
+OpenCode CLI, starts a local OpenAI-compatible server on `127.0.0.1`, and opens OpenCode in
+the same terminal in `local-ai/workspace`. Two engines: llama.cpp + GGUF everywhere, and on
+Apple Silicon also MLX (`mlx_lm.server`). The user picks one so the two can be benchmarked
+side by side. Target users are non-technical: arrow-key menus,
 Enter = recommended option. Code, comments and launchers are English. User-facing text lives
 only in `STRINGS` (`en` + `ru`, picked from the system locale). The wiki and commit messages are Russian.
 
@@ -29,7 +31,8 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
   That is how to script the dry run: `printf '\n\n1\n' | …`.
 - To test installs without the network, serve archives with `python3 -m http.server` and
   override `LLAMA_URL` / `OPENCODE_URL` from a `python3 -c 'import local_ai_starter as m; …'`.
-- Real model runs download GB-sized weights: warn the user before starting one.
+- Real model runs download GB-sized weights: warn the user before starting one. The MLX runtime
+  can be checked cheaply: `uv venv` + `uv pip install --dry-run mlx-lm==…` with `uv_env()`.
 
 ## Architecture
 
@@ -42,14 +45,25 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
   refused / TLS / HTTP; 404 means the pin is gone, not that the network is blocked).
   `Cancelled` means the user backed out. `main` prints all of them.
 - **Downloads (`download`)**: resumable `.part` + `Range`, 30 s stall timeout, 5 retries,
-  SHA-256 checked before the rename. A pre-flight fetch of byte 0 (15 s) covers redirects and CDNs.
-- **Pins**: `LLAMA_BUILD`/`LLAMA_SHA256` and `OPENCODE_VERSION`/`OPENCODE_SHA256`, one hash
-  per platform key from `llama_platform()` / `opencode_platform()`. Models pin `sha256` in
-  `PROFILES`, taken from Hugging Face LFS metadata (`/api/models/<repo>/tree/main`).
-- **Models**: stored at `models/<family>/<file>.gguf`. The server gets `-m <path>`, never
-  `-hf`, so the layout stays readable. The profile `key` is the server `--alias` and the
-  OpenCode model id. Context is 32K (16K below 12 GB RAM) with a q8_0 KV cache, because
-  OpenCode's prompt is ~10K tokens.
+  SHA-256 (when known) checked before the rename. A pre-flight fetch of byte 0 (15 s) covers redirects and CDNs.
+- **Pins**: `LLAMA_BUILD`/`LLAMA_SHA256` and `OPENCODE_VERSION`/`OPENCODE_SHA256` (one hash
+  per platform key), `UV_VERSION`/`UV_SHA256` and `MLX_LM_VERSION`. Its Python dependencies are
+  resolved at install time and not hash-pinned. Model hashes come from Hugging Face LFS
+  metadata (`/api/models/<repo>/tree/<rev>`).
+- **Profiles (`_MODELS`)**: one line-up mirrored for both engines (`_gguf` / `_mlx`, keys
+  `<base>` and `<base>-mlx`), ordered small → large. The recommendation is the largest
+  profile with `min_ram_gb` ≤ RAM. Labels come from `STRINGS["model.<base>"]`. GGUF pins a file +
+  SHA-256; MLX pins a repo commit (in `file`) and checks every LFS file against its hash at that commit.
+- **Storage never overlaps**: `engines/llama.cpp/`, `engines/mlx/` (uv, uv-managed Python 3.12,
+  venv with pinned `mlx-lm`), `models/gguf/<family>/<file>.gguf`, `models/mlx/<family>/<repo>/`
+  (+ `.complete` marker). `migrate_layout()` moves the v2 layout (`bin/`, `models/<family>/`) in place.
+- **Server ids**: llama-server gets `--alias <key>`. `mlx_lm.server` loads any unknown
+  `model` name as a new model, so OpenCode and requests use `default_model` for MLX
+  (`api_model()`, stored as `model_id` in `state.json`). Context is 32K (16K below 12 GB RAM,
+  64K from 48 GB) with a q8_0 KV cache on llama.cpp. OpenCode's prompt is ~10K tokens.
+- **Speed test (`speed_test`)**: streams a ~4K-token prompt (prefill, TTFT) and a ~300-token
+  answer (generation tok/s). It counts `content`, `reasoning_content` (llama.cpp) and `reasoning` (MLX)
+  deltas and appends a row to `local-ai/benchmarks.csv`.
 - **Archives (`extract`)**: drops a shared top folder, refuses paths and symlink targets
   outside the target, and recreates tar symlinks. llama.cpp dylibs are symlinks, and
   `llama-server` does not start without them.
@@ -77,8 +91,8 @@ this file is the schema. Start from `docs/wiki/index.md`; current state is in `d
 
 - Structure: `index.md`, `log.md` (append-only), `status.md`, `architecture.md`,
   `debugging_log.md`, `entities/` (wizard-flow, terminal-ui, i18n, network, profiles,
-  llama-engine, server-lifecycle, opencode-integration, launchers), `workflows/` (build, test,
-  update-llama-build, update-opencode).
+  llama-engine, mlx-engine, server-lifecycle, speed-test, opencode-integration, launchers),
+  `workflows/` (build, test, update-llama-build, update-opencode, update-models).
 - Ingest: new info → its one canonical page → dated `log.md` entry → `status.md` if affected.
   Query: wiki first, code as fallback, file the answer back. Lint: contradictions, stale
   `file:line` refs, orphans, missing links. Full procedures are in the `/wiki` command.

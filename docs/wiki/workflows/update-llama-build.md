@@ -1,6 +1,6 @@
 # Update llama.cpp build
 
-Сборка закреплена в `LLAMA_BUILD` и `LLAMA_SHA256` (`local_ai_starter.py:52-62`), см.
+Сборка закреплена в `LLAMA_BUILD` и `LLAMA_SHA256` (`local_ai_starter.py:57-67`), см.
 [llama-engine](../entities/llama-engine.md).
 
 1. Выбрать релиз на https://github.com/ggml-org/llama.cpp/releases.
@@ -14,4 +14,4 @@
 5. Пройти ручной чеклист и записать номер сборки в [status](../status.md) и [log](../log.md).
 
 Существующие установки не обновятся сами: `install_llama` вызывается, только если
-`bin/llama-server` нет ([wizard-flow](../entities/wizard-flow.md), `ensure_installed`).
+`engines/llama.cpp/llama-server` нет ([wizard-flow](../entities/wizard-flow.md), `ensure_installed`).

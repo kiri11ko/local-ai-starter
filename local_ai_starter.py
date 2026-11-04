@@ -5,8 +5,8 @@ Run with no arguments: ``python3 local_ai_starter.py`` (or double-click RunMe.*)
 ``--menu`` opens the management menu without starting OpenCode.
 
 Everything the script downloads or creates lives in the ``local-ai`` folder next to
-it: engine, models (``models/<family>/``), OpenCode, its settings, the workspace and
-the log. Deleting that folder removes everything. The server listens on 127.0.0.1
+it: engines (``engines/llama.cpp``, ``engines/mlx``), models (``models/<engine>/<family>/``),
+OpenCode, its settings, the workspace, the log and speed-test results. Deleting that folder removes everything. The server listens on 127.0.0.1
 only. PATH, shell configs and global OpenCode settings are never touched.
 """
 
@@ -39,7 +39,9 @@ STALL_TIMEOUT = 30       # seconds without a single byte before a download is re
 DOWNLOAD_ATTEMPTS = 5
 
 ROOT = Path(os.environ.get("LOCAL_AI_STARTER_HOME") or (Path(__file__).resolve().parent / "local-ai"))
-BIN_DIR = ROOT / "bin"
+ENGINES_DIR = ROOT / "engines"
+LLAMA_DIR = ENGINES_DIR / "llama.cpp"
+MLX_DIR = ENGINES_DIR / "mlx"
 MODELS_DIR = ROOT / "models"
 OPENCODE_DIR = ROOT / "opencode"
 OPENCODE_HOME = ROOT / "opencode-home"
@@ -47,6 +49,9 @@ OPENCODE_CONFIG = ROOT / "opencode.json"
 WORKSPACE_DIR = ROOT / "workspace"
 STATE_FILE = ROOT / "state.json"
 LOG_FILE = ROOT / "server.log"
+BENCH_FILE = ROOT / "benchmarks.csv"
+
+ENGINE_NAMES = {"gguf": "llama.cpp", "mlx": "MLX"}
 
 # Pinned llama.cpp build: one version for everyone, hashes from the release page.
 LLAMA_BUILD = "b12110"
@@ -60,6 +65,15 @@ LLAMA_SHA256 = {
     "win-cpu-arm64": "f8d20fb07d0b499988ced8963afcd5ded2d2cdd9983b757fbc7e51c4abd722e8",
 }
 LLAMA_SIZE_MB = 40
+
+# MLX (Apple Silicon only): mlx-lm needs Python 3.11+, so a pinned uv brings its own Python.
+UV_VERSION = "0.13.1"
+UV_URL = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-aarch64-apple-darwin.tar.gz"
+UV_SHA256 = "cfe454573412ff7380d15fc7dae5997ab53ffce72fce0a78e91ddbc84001acd2"
+MLX_PYTHON = "3.12"
+MLX_LM_VERSION = "0.32.2"
+MLX_PYPI_URL = f"https://pypi.org/pypi/mlx-lm/{MLX_LM_VERSION}/json"
+MLX_SIZE_MB = 300  # uv + Python + mlx, mlx-lm and their dependencies, roughly
 
 # Pinned OpenCode CLI build, same idea: official GitHub release asset + SHA-256.
 OPENCODE_VERSION = "v1.19.5"
@@ -77,32 +91,71 @@ OPENCODE_SIZE_MB = 80
 
 @dataclass(frozen=True)
 class Profile:
-    key: str          # server alias and OpenCode model id
-    family: str       # folder under models/
+    key: str          # unique id, kept in state.json; llama-server --alias
+    base: str         # model name shared by both engines, picks the label in STRINGS
+    engine: str       # "gguf" (llama.cpp) or "mlx"
+    family: str       # folder under models/<engine>/
     repo: str         # Hugging Face repository
-    file: str         # GGUF file name in the repository
+    file: str         # gguf: file name; mlx: pinned commit of the repository
+    quant: str
     size: int         # bytes
-    sha256: str
+    sha256: str       # gguf only; MLX files are checked against the LFS hashes of the pinned commit
     min_ram_gb: int
 
     @property
     def path(self) -> Path:
-        return MODELS_DIR / self.family / self.file
+        name = self.file if self.engine == "gguf" else self.repo.split("/")[-1]
+        return MODELS_DIR / self.engine / self.family / name
+
+    @property
+    def label_path(self) -> str:
+        return str(self.path.relative_to(MODELS_DIR))
 
     @property
     def url(self) -> str:
-        return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
+        if self.engine == "gguf":
+            return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
+        return f"https://huggingface.co/api/models/{self.repo}/tree/{self.file}?recursive=1"
+
+    @property
+    def installed(self) -> bool:
+        return self.path.is_file() if self.engine == "gguf" else (self.path / ".complete").exists()
 
 
-PROFILES = {
-    "qwen3-4b": Profile("qwen3-4b", "qwen", "Qwen/Qwen3-4B-GGUF", "Qwen3-4B-Q4_K_M.gguf", 2497280256,
-                        "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5", 8),
-    "qwen3-8b": Profile("qwen3-8b", "qwen", "Qwen/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M.gguf", 5027783488,
-                        "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785", 12),
-    "qwen2.5-coder-7b": Profile("qwen2.5-coder-7b", "qwen", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-                                "qwen2.5-coder-7b-instruct-q4_k_m.gguf", 4683073536,
-                                "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c", 12),
-}
+def _gguf(base, repo, file, quant, size, sha256, ram):
+    return Profile(base if quant.startswith("Q4") else f"{base}-q8", base if quant.startswith("Q4") else f"{base}-q8",
+                   "gguf", "qwen", repo, file, quant, size, sha256, ram)
+
+
+def _mlx(base, repo, commit, quant, size, ram):
+    return Profile(f"{base}-mlx", base, "mlx", "qwen", repo, commit, quant, size, "", ram)
+
+
+# Ordered from small to large; the recommendation is the largest one that fits the memory.
+# GGUF and MLX lines mirror each other, so both engines can be compared on the same model.
+_MODELS = [
+    _gguf("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q4_K_M.gguf", "Q4_K_M", 2740937888,
+          "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4", 8),
+    _gguf("qwen3.5-9b", "unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf", "Q4_K_M", 5680522464,
+          "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8", 16),
+    _gguf("qwen3.8-27b", "ggml-org/Qwen3.8-27B-GGUF", "Qwen3.8-27B-Q4_K_M.gguf", "Q4_K_M", 18973870528,
+          "c600de0300ae8a0eb3a6c0b8b5561b8b96f16bd2c863c2a66c42de29d391a747", 32),
+    _gguf("qwen3.6-35b-a3b", "ggml-org/Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-Q4_K_M.gguf", "Q4_K_M", 20419565568,
+          "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7", 48),
+    _gguf("qwen3.6-35b-a3b", "ggml-org/Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-Q8_0.gguf", "Q8_0", 36903139328,
+          "d8d7842cc657d720f39546878e431937c84473aa130c36371669ac17c80c7361", 64),
+    _mlx("qwen3.5-4b", "mlx-community/Qwen3.5-4B-4bit", "0e7ffd5c629ef7719d4cbc04069232580bfa9d9c",
+         "4-bit", 3061130647, 8),
+    _mlx("qwen3.5-9b", "mlx-community/Qwen3.5-9B-4bit", "8b2b98c00a6b4d291155e4890773ca8f769aee53",
+         "4-bit", 5977073303, 16),
+    _mlx("qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit", "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+         "4-bit", 16081490933, 32),
+    _mlx("qwen3.6-35b-a3b", "mlx-community/Qwen3.6-35B-A3B-4bit", "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+         "4-bit", 20429169263, 48),
+    _mlx("qwen3.6-35b-a3b-q8", "mlx-community/Qwen3.6-35B-A3B-8bit", "e06a74e6236a60c8367e1a3214e83d8b61b637b0",
+         "8-bit", 37748367994, 64),
+]
+PROFILES = {profile.key: profile for profile in _MODELS}
 
 
 # ───────────────────────────── strings ─────────────────────────────
@@ -123,9 +176,28 @@ STRINGS = {
         "system": "System", "memory": "Memory", "disk_free": "Free disk space",
         "unknown": "unknown",
         "pick_model": "Which model should the assistant use?",
-        "model.qwen3-4b": "Qwen3 4B, fast: runs even on a modest computer",
-        "model.qwen3-8b": "Qwen3 8B, balanced: smarter, wants 12 GB+ of memory",
-        "model.qwen2.5-coder-7b": "Qwen2.5 Coder 7B: tuned for code",
+        "model.qwen3.5-4b": "Qwen3.5 4B: fast, fits 8 GB",
+        "model.qwen3.5-9b": "Qwen3.5 9B: balanced, 16 GB",
+        "model.qwen3.8-27b": "Qwen3.8 27B: newest and smartest, slower, 32 GB",
+        "model.qwen3.6-35b-a3b": "Qwen3.6 35B-A3B: large but fast (MoE), 48 GB",
+        "model.qwen3.6-35b-a3b-q8": "Qwen3.6 35B-A3B, 8-bit: best quality, 64 GB",
+        "pick_engine": "Which engine should run the model?",
+        "engine.gguf": "llama.cpp, GGUF models: works on every system, mature tool calling",
+        "engine.mlx": "MLX, Apple's framework: often faster on Apple Silicon",
+        "plan_mlx": "MLX runtime: uv {uv}, Python {py}, mlx-lm {ver}",
+        "mlx_failed": "Installing the MLX runtime failed, see the messages above. Run RunMe again: "
+                      "everything already downloaded is kept.",
+        "file_n": "{name} ({i} of {n})",
+        "chat_mlx": "The web chat comes with llama.cpp only. With MLX use OpenCode, or switch the engine.",
+        "menu.bench": "Speed test (results go to benchmarks.csv)",
+        "bench_title": "Speed test: {model} on {engine}",
+        "bench_running": "Measuring: a long prompt, then a ~300-token answer. This takes a minute or two…",
+        "bench_prefill": "Prompt reading: {tps:.0f} tokens/s ({n} tokens, first token after {ttft:.1f} s)",
+        "bench_gen": "Answer generation: {tps:.1f} tokens/s ({n} tokens)",
+        "bench_saved": "Saved to {file}",
+        "bench_fail": "The speed test failed: {error}",
+        "models_incomplete": "incomplete",
+        "status_bench": "Speed tests",
         "low_ram": "This model wants {need} GB of memory, you have {have:.0f} GB. It may be slow.",
         "continue_anyway": "Continue anyway?",
         "low_disk": "Not enough free space: about {need:.1f} GB is needed, {have:.1f} GB is free.",
@@ -181,7 +253,7 @@ STRINGS = {
         "menu.keep_exit": "Exit, keep the server running",
         "menu.opencode": "Back to OpenCode",
         "menu.chat": "Open the web chat in the browser",
-        "menu.switch": "Switch model",
+        "menu.switch": "Switch model or engine",
         "menu.models": "Models on disk",
         "menu.status": "Status and log",
         "menu.uninstall": "Delete everything that was downloaded",
@@ -197,7 +269,7 @@ STRINGS = {
         "status_server": "Server", "status_model": "Model", "status_log": "Log", "status_last": "Last line",
         "installed": "installed", "not_installed": "not installed",
         "running_on": "running, port {port}", "not_running": "not running",
-        "uninstall_warn": "The whole folder {root} will be deleted: engine, models, OpenCode and the workspace.",
+        "uninstall_warn": "The whole folder {root} will be deleted: engines, models, OpenCode, the workspace and speed tests.",
         "uninstall_confirm": "Delete everything?",
         "uninstall_done": "Done. Nothing else is left on the system.",
         "demo_title": "Practice page",
@@ -219,9 +291,28 @@ STRINGS = {
         "system": "Система", "memory": "Память", "disk_free": "Свободно на диске",
         "unknown": "не удалось определить",
         "pick_model": "Какую модель взять помощнику?",
-        "model.qwen3-4b": "Qwen3 4B, быстрая: идёт даже на скромном компьютере",
-        "model.qwen3-8b": "Qwen3 8B, сбалансированная: умнее, нужно от 12 ГБ памяти",
-        "model.qwen2.5-coder-7b": "Qwen2.5 Coder 7B: заточена под код",
+        "model.qwen3.5-4b": "Qwen3.5 4B: быстрая, хватит 8 ГБ",
+        "model.qwen3.5-9b": "Qwen3.5 9B: сбалансированная, 16 ГБ",
+        "model.qwen3.8-27b": "Qwen3.8 27B: новейшая и самая умная, медленнее, 32 ГБ",
+        "model.qwen3.6-35b-a3b": "Qwen3.6 35B-A3B: большая, но быстрая (MoE), 48 ГБ",
+        "model.qwen3.6-35b-a3b-q8": "Qwen3.6 35B-A3B, 8 бит: лучшее качество, 64 ГБ",
+        "pick_engine": "На каком движке запускать модель?",
+        "engine.gguf": "llama.cpp, модели GGUF: работает на любой системе, отлаженный вызов инструментов",
+        "engine.mlx": "MLX, фреймворк Apple: на Apple Silicon часто быстрее",
+        "plan_mlx": "Среда MLX: uv {uv}, Python {py}, mlx-lm {ver}",
+        "mlx_failed": "Не удалось установить среду MLX, подробности выше. Запустите RunMe ещё раз: "
+                      "всё уже скачанное сохранится.",
+        "file_n": "{name} ({i} из {n})",
+        "chat_mlx": "Веб-чат есть только у llama.cpp. С MLX работайте в OpenCode или смените движок.",
+        "menu.bench": "Замер скорости (результаты — в benchmarks.csv)",
+        "bench_title": "Замер скорости: {model} на {engine}",
+        "bench_running": "Замеряю: длинный запрос, затем ответ ~300 токенов. Займёт минуту-две…",
+        "bench_prefill": "Чтение запроса: {tps:.0f} токенов/с ({n} токенов, первый токен через {ttft:.1f} с)",
+        "bench_gen": "Генерация ответа: {tps:.1f} токенов/с ({n} токенов)",
+        "bench_saved": "Записано в {file}",
+        "bench_fail": "Замер не удался: {error}",
+        "models_incomplete": "не докачано",
+        "status_bench": "Замеры скорости",
         "low_ram": "Этой модели желательно {need} ГБ памяти, у вас {have:.0f} ГБ. Может работать медленно.",
         "continue_anyway": "Всё равно продолжить?",
         "low_disk": "Мало места: нужно около {need:.1f} ГБ, свободно {have:.1f} ГБ.",
@@ -277,7 +368,7 @@ STRINGS = {
         "menu.keep_exit": "Выйти, сервер оставить работать",
         "menu.opencode": "Вернуться в OpenCode",
         "menu.chat": "Открыть веб-чат в браузере",
-        "menu.switch": "Сменить модель",
+        "menu.switch": "Сменить модель или движок",
         "menu.models": "Модели на диске",
         "menu.status": "Состояние и журнал",
         "menu.uninstall": "Удалить всё, что скачано",
@@ -293,7 +384,7 @@ STRINGS = {
         "status_server": "Сервер", "status_model": "Модель", "status_log": "Журнал", "status_last": "Последняя строка",
         "installed": "установлен", "not_installed": "не установлен",
         "running_on": "работает, порт {port}", "not_running": "не запущен",
-        "uninstall_warn": "Будет удалена папка {root} целиком: движок, модели, OpenCode и рабочая папка.",
+        "uninstall_warn": "Будет удалена папка {root} целиком: движки, модели, OpenCode, рабочая папка и замеры.",
         "uninstall_confirm": "Удалить всё?",
         "uninstall_done": "Готово. В системе ничего больше не осталось.",
         "demo_title": "Учебная страница",
@@ -710,8 +801,8 @@ def _progress(done: int, total: int, started: float, base: int) -> None:
           end="", flush=True)
 
 
-def download(url: str, target: Path, sha256: str, name: str) -> None:
-    """Resumable download into target.part, verified, then renamed to target."""
+def download(url: str, target: Path, sha256: str | None, name: str) -> None:
+    """Resumable download into target.part, verified (when a hash is known), then renamed to target."""
     say(t("downloading", name=name))
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + ".part")
@@ -752,12 +843,14 @@ def download(url: str, target: Path, sha256: str, name: str) -> None:
             pause = min(5 * attempt, 20)
             say(dim(t("download_retry", reason=_net_reason(error, STALL_TIMEOUT), sec=pause, i=attempt + 1, n=DOWNLOAD_ATTEMPTS)))
             time.sleep(pause)
-    say(dim(t("verifying")))
-    if sha256_of(part) != sha256:
-        part.unlink(missing_ok=True)
-        raise RuntimeError(t("hash_bad", name=name))
+    if sha256:
+        say(dim(t("verifying")))
+        if sha256_of(part) != sha256:
+            part.unlink(missing_ok=True)
+            raise RuntimeError(t("hash_bad", name=name))
     part.replace(target)
-    say(ok(t("hash_ok")))
+    if sha256:
+        say(ok(t("hash_ok")))
 
 
 def sha256_of(path: Path) -> str:
@@ -828,14 +921,31 @@ def make_executable(path: Path) -> None:
 
 # ───────────────────────────── components ─────────────────────────────
 
+def is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine().lower() == "arm64"
+
+
 def server_binary() -> Path | None:
-    path = BIN_DIR / exe("llama-server")
+    path = LLAMA_DIR / exe("llama-server")
     return path if path.exists() else None
 
 
 def opencode_binary() -> Path | None:
     path = OPENCODE_DIR / exe("opencode")
     return path if path.exists() else None
+
+
+def mlx_python() -> Path:
+    return MLX_DIR / "venv" / "bin" / "python"
+
+
+def mlx_installed() -> bool:
+    marker = MLX_DIR / ".installed"
+    return marker.exists() and marker.read_text().strip() == MLX_LM_VERSION and mlx_python().exists()
+
+
+def engine_installed(engine: str) -> bool:
+    return mlx_installed() if engine == "mlx" else server_binary() is not None
 
 
 def llama_asset() -> tuple[str, str]:
@@ -864,14 +974,40 @@ def _install_archive(url: str, sha256: str, target: Path, name: str) -> None:
 def install_llama() -> None:
     url, plat = llama_asset()
     if DRY_RUN:
-        say(t("dry_run_would", what=f"download {url} → {BIN_DIR}"))
+        say(t("dry_run_would", what=f"download {url} → {LLAMA_DIR}"))
         return
-    _install_archive(url, LLAMA_SHA256[plat], BIN_DIR, f"llama.cpp {LLAMA_BUILD}")
-    for path in BIN_DIR.iterdir():
+    _install_archive(url, LLAMA_SHA256[plat], LLAMA_DIR, f"llama.cpp {LLAMA_BUILD}")
+    for path in LLAMA_DIR.iterdir():
         if path.is_file() and path.name.startswith("llama"):
             make_executable(path)
     if not server_binary():
         raise RuntimeError(t("no_server_binary"))
+
+
+def uv_env() -> dict:
+    """uv, its Python and its caches all stay inside engines/mlx/."""
+    return dict(os.environ, UV_PYTHON_INSTALL_DIR=str(MLX_DIR / "python"), UV_CACHE_DIR=str(MLX_DIR / "cache"),
+                UV_PYTHON_PREFERENCE="only-managed", UV_NO_CONFIG="1", UV_NO_PROGRESS="0")
+
+
+def install_mlx() -> None:
+    """uv (pinned) → Python 3.12 managed by uv → venv with mlx-lm (pinned version)."""
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"install uv {UV_VERSION}, Python {MLX_PYTHON}, mlx-lm {MLX_LM_VERSION} → {MLX_DIR}"))
+        return
+    uv = MLX_DIR / "uv" / "uv"
+    if not uv.exists():
+        _install_archive(UV_URL, UV_SHA256, MLX_DIR / "uv", f"uv {UV_VERSION}")
+        make_executable(uv)
+    commands = [[str(uv), "venv", str(MLX_DIR / "venv"), "--python", MLX_PYTHON, "--clear"],
+                [str(uv), "pip", "install", "--python", str(mlx_python()), f"mlx-lm=={MLX_LM_VERSION}"]]
+    for command in commands:
+        say(dim("$ " + " ".join(command)))
+        try:
+            subprocess.run(command, env=uv_env(), check=True)
+        except (subprocess.CalledProcessError, OSError):
+            raise RuntimeError(t("mlx_failed")) from None
+    (MLX_DIR / ".installed").write_text(MLX_LM_VERSION + "\n")
 
 
 def install_opencode() -> None:
@@ -885,18 +1021,43 @@ def install_opencode() -> None:
         raise RuntimeError(t("no_opencode_binary"))
 
 
+def mlx_files(profile: Profile) -> list[dict]:
+    """File list of an MLX repo at the pinned commit (LFS files carry their SHA-256)."""
+    try:
+        _, files = http_json(profile.url, timeout=NET_CHECK_TIMEOUT)
+    except (urllib.error.URLError, OSError) as error:
+        raise network_error(profile.url, error) from None
+    skip = {".gitattributes", "README.md"}
+    return [f for f in files if f.get("type") == "file" and f["path"] not in skip]
+
+
 def install_model(profile: Profile) -> None:
     if DRY_RUN:
         say(t("dry_run_would", what=f"download {profile.url} → {profile.path}"))
         return
-    download(profile.url, profile.path, profile.sha256, profile.file)
+    if profile.engine == "gguf":
+        download(profile.url, profile.path, profile.sha256, profile.file)
+        return
+    files = mlx_files(profile)
+    root = profile.path.resolve()
+    for index, item in enumerate(files, 1):
+        target = profile.path / item["path"]
+        if root not in target.resolve().parents:
+            raise RuntimeError(f"Unsafe path in repository: {item['path']}")
+        if target.exists() and target.stat().st_size == item.get("size"):
+            continue
+        url = f"https://huggingface.co/{profile.repo}/resolve/{profile.file}/{item['path']}"
+        sha256 = (item.get("lfs") or {}).get("oid")
+        download(url, target, sha256, t("file_n", name=item["path"], i=index, n=len(files)))
+    (profile.path / ".complete").write_text(profile.file + "\n")
 
 
 # ───────────────────────────── server ─────────────────────────────
 
 def http_json(url: str, payload: dict | None = None, timeout: int = 10):
     data = json.dumps(payload).encode() if payload is not None else None
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json",
+                                                              "User-Agent": "local-ai-starter"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.status, json.loads(response.read().decode() or "{}")
 
@@ -919,11 +1080,23 @@ def log_tail() -> str:
 def context_size() -> int:
     """OpenCode's system prompt and tools take ~10k tokens, so 32k is the comfortable minimum."""
     ram = ram_gb()
-    return 16384 if ram and ram < 12 else 32768
+    if ram and ram < 12:
+        return 16384
+    if ram and ram >= 48:
+        return 65536
+    return 32768
+
+
+def api_model(profile: Profile) -> str:
+    # mlx_lm.server treats any other model name as a new model to load; its CLI model is "default_model".
+    return "default_model" if profile.engine == "mlx" else profile.key
 
 
 def server_command(profile: Profile, port: int, ctx: int) -> list[str]:
-    binary = server_binary() or BIN_DIR / exe("llama-server")
+    if profile.engine == "mlx":
+        return [str(mlx_python()), "-m", "mlx_lm.server", "--model", str(profile.path),
+                "--host", "127.0.0.1", "--port", str(port), "--max-tokens", "8192"]
+    binary = server_binary() or LLAMA_DIR / exe("llama-server")
     return [str(binary), "-m", str(profile.path), "--alias", profile.key, "-c", str(ctx),
             "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--jinja",
             "--host", "127.0.0.1", "--port", str(port)]
@@ -933,19 +1106,27 @@ def start_server(profile: Profile, port: int) -> dict:
     ctx = context_size()
     command = server_command(profile, port, ctx)
     state = read_state()
+    fresh = {"port": port, "profile": profile.key, "engine": profile.engine, "model_id": api_model(profile),
+             "ctx": ctx, "started_at": int(time.time())}
     if DRY_RUN:
         say(t("dry_run_would", what="run " + " ".join(command)))
-        return {"pid": 0, "port": port, "profile": profile.key, "ctx": ctx}
+        return dict(fresh, pid=0)
     options: dict = {}
     if platform.system() == "Windows":
         options["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
+    env = dict(os.environ)
+    workdir = LLAMA_DIR
+    if profile.engine == "mlx":
+        workdir = MLX_DIR
+        env.update(HF_HOME=str(MLX_DIR / "hf"), HF_HUB_OFFLINE="1")  # the model is local, never fetch
     with LOG_FILE.open("ab") as log:
+        log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(command)}\n".encode())
+        log.flush()
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                   cwd=str(BIN_DIR), **options)
-    state.update({"pid": process.pid, "port": port, "profile": profile.key, "ctx": ctx,
-                  "started_at": int(time.time())})
+                                   cwd=str(workdir), env=env, **options)
+    state.update(fresh, pid=process.pid)
     write_state(state)
     return state
 
@@ -969,7 +1150,8 @@ def wait_ready(state: dict) -> None:
     say(dim(t("server_test")))
     status, body = http_json(
         f"http://127.0.0.1:{state['port']}/v1/chat/completions",
-        {"model": state["profile"], "messages": [{"role": "user", "content": "Say OK"}], "max_tokens": 16},
+        {"model": state.get("model_id", state["profile"]), "messages": [{"role": "user", "content": "Say OK"}],
+         "max_tokens": 16},
         timeout=300,
     )
     if status != 200 or not body.get("choices"):
@@ -1022,22 +1204,98 @@ def bring_up(profile: Profile) -> dict:
     return state
 
 
+# ───────────────────────────── speed test ─────────────────────────────
+
+def _stream_completion(port: int, model_id: str, prompt: str, max_tokens: int) -> dict:
+    """Streams one answer; returns prompt/answer token counts, time to first token and generation time."""
+    payload = {"model": model_id, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
+               "temperature": 0, "stream": True, "stream_options": {"include_usage": True}}
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                     data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    started, first, chunks, usage = time.time(), None, 0, {}
+    with urllib.request.urlopen(request, timeout=900) as response:
+        for raw in response:
+            line = raw.decode(errors="ignore").strip()
+            if not line.startswith("data:") or line == "data: [DONE]":
+                continue
+            try:
+                event = json.loads(line[5:])
+            except ValueError:
+                continue
+            usage = event.get("usage") or usage
+            for choice in event.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if any(delta.get(k) for k in ("content", "reasoning_content", "reasoning")):
+                    if first is None:
+                        first = time.time()
+                    chunks += 1
+    finished = time.time()
+    first = first or finished
+    return {"prompt_tokens": usage.get("prompt_tokens") or 0,
+            "answer_tokens": usage.get("completion_tokens") or chunks,
+            "ttft": first - started, "gen_time": max(finished - first, 1e-6)}
+
+
+def chip_name() -> str:
+    try:
+        if platform.system() == "Darwin":
+            return subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True,
+                                  text=True, timeout=3).stdout.strip()
+    except Exception:
+        pass
+    return platform.processor() or platform.machine()
+
+
+def speed_test(profile: Profile) -> None:
+    profile = ensure_installed(profile)
+    state = bring_up(profile)
+    say("\n" + bold(t("bench_title", model=profile.key, engine=ENGINE_NAMES[profile.engine])))
+    say(dim(t("bench_running")))
+    if DRY_RUN:
+        return
+    numbers = ", ".join(str(n) for n in range(1, 1500))
+    long_prompt = f"Here is a list: {numbers}. How many items are in the list? Answer with one number."
+    short_prompt = "Write a short story (about 200 words) about a robot that learns to paint."
+    try:
+        _stream_completion(state["port"], state["model_id"], "Say OK", 8)  # warm-up
+        prefill = _stream_completion(state["port"], state["model_id"], long_prompt, 16)
+        gen = _stream_completion(state["port"], state["model_id"], short_prompt, 300)
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        say(fail(t("bench_fail", error=error)))
+        return
+    prefill_tps = prefill["prompt_tokens"] / prefill["ttft"] if prefill["ttft"] else 0
+    gen_tps = (gen["answer_tokens"] - 1) / gen["gen_time"] if gen["answer_tokens"] > 1 else 0
+    say(ok(t("bench_prefill", tps=prefill_tps, n=prefill["prompt_tokens"], ttft=prefill["ttft"])))
+    say(ok(t("bench_gen", tps=gen_tps, n=gen["answer_tokens"])))
+    new_file = not BENCH_FILE.exists()
+    with BENCH_FILE.open("a", encoding="utf-8") as out:
+        if new_file:
+            out.write("date,engine,model,chip,ram_gb,context,prompt_tokens,first_token_s,prefill_tok_s,"
+                      "answer_tokens,generation_tok_s\n")
+        ram = ram_gb() or 0
+        out.write(f"{time.strftime('%Y-%m-%d %H:%M')},{profile.engine},{profile.key},\"{chip_name()}\",{ram:.0f},"
+                  f"{state.get('ctx', '')},{prefill['prompt_tokens']},{prefill['ttft']:.2f},{prefill_tps:.1f},"
+                  f"{gen['answer_tokens']},{gen_tps:.1f}\n")
+    say(dim(t("bench_saved", file=BENCH_FILE)))
+
+
 # ───────────────────────────── OpenCode ─────────────────────────────
 
 def write_opencode_config(profile: Profile, port: int, ctx: int) -> None:
+    model_id = api_model(profile)
     config = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
         "share": "disabled",
         "provider": {"local-ai-starter": {
             "npm": "@ai-sdk/openai-compatible",
-            "name": "Local AI Starter (llama.cpp)",
+            "name": f"Local AI Starter ({ENGINE_NAMES[profile.engine]})",
             "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
-            "models": {profile.key: {"name": f"{profile.key} (local)", "tool_call": True,
-                                     "limit": {"context": ctx, "output": 4096}}},
+            "models": {model_id: {"name": f"{profile.key} ({ENGINE_NAMES[profile.engine]}, local)",
+                                  "tool_call": True, "limit": {"context": ctx, "output": 4096}}},
         }},
-        "model": f"local-ai-starter/{profile.key}",
-        "small_model": f"local-ai-starter/{profile.key}",
+        "model": f"local-ai-starter/{model_id}",
+        "small_model": f"local-ai-starter/{model_id}",
     }
     ROOT.mkdir(parents=True, exist_ok=True)
     OPENCODE_CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1083,6 +1341,26 @@ def launch_opencode(profile: Profile, state: dict) -> None:
 
 # ───────────────────────────── scenarios ─────────────────────────────
 
+def migrate_layout() -> None:
+    """Moves files from the v2 layout (bin/, models/<family>/) so nothing is downloaded twice."""
+    if DRY_RUN or not ROOT.exists():
+        return
+    old_bin = ROOT / "bin"
+    if old_bin.is_dir() and not LLAMA_DIR.exists():
+        LLAMA_DIR.parent.mkdir(parents=True, exist_ok=True)
+        old_bin.rename(LLAMA_DIR)
+    if MODELS_DIR.is_dir():
+        for folder in list(MODELS_DIR.iterdir()):
+            if folder.is_dir() and folder.name not in ("gguf", "mlx"):
+                target = MODELS_DIR / "gguf" / folder.name
+                target.mkdir(parents=True, exist_ok=True)
+                for item in folder.iterdir():
+                    if not (target / item.name).exists():
+                        item.rename(target / item.name)
+                if not any(folder.iterdir()):
+                    folder.rmdir()
+
+
 def show_system() -> float | None:
     ram = ram_gb()
     say("\n" + bold(t("system_check")))
@@ -1093,14 +1371,30 @@ def show_system() -> float | None:
     return ram
 
 
+def choose_engine() -> str:
+    if not is_apple_silicon():
+        return "gguf"
+    engines = ["gguf", "mlx"]
+    options = []
+    for engine in engines:
+        label = t("engine." + engine)
+        if engine_installed(engine):
+            label += " ✓"
+        options.append(label)
+    return engines[ask(t("pick_engine"), options, 1) - 1]
+
+
 def choose_profile() -> Profile:
     ram = show_system()
-    recommended = PROFILES["qwen3-8b"] if (ram or 16) >= 12 else PROFILES["qwen3-4b"]
-    ordered = [recommended] + [p for p in PROFILES.values() if p is not recommended]
+    engine = choose_engine()
+    candidates = [p for p in PROFILES.values() if p.engine == engine]
+    fitting = [p for p in candidates if p.min_ram_gb <= (ram or 16)]
+    recommended = fitting[-1] if fitting else candidates[0]
+    ordered = [recommended] + [p for p in candidates if p is not recommended]
     options = []
     for profile in ordered:
-        label = f"{t('model.' + profile.key)} · {size_text(profile.size / 2**30)}"
-        if profile.path.exists():
+        label = f"{t('model.' + profile.base)} · {profile.quant} · {size_text(profile.size / 2**30)}"
+        if profile.installed:
             label += " ✓"
         if profile is recommended:
             label += f" ({t('recommended')})"
@@ -1113,19 +1407,26 @@ def choose_profile() -> Profile:
     return profile
 
 
+def engine_task(engine: str) -> tuple:
+    if engine == "mlx":
+        return (t("plan_mlx", uv=UV_VERSION, py=MLX_PYTHON, ver=MLX_LM_VERSION), MLX_SIZE_MB / 1024,
+                [UV_URL, MLX_PYPI_URL], install_mlx)
+    return (t("plan_engine", build=LLAMA_BUILD), LLAMA_SIZE_MB / 1024, [llama_asset()[0]], install_llama)
+
+
 def ensure_installed(profile: Profile | None) -> Profile:
     """Asks only what is still unknown, installs only what is still missing."""
     if profile is None:
         profile = choose_profile()
     tasks = []
-    if not server_binary() or DRY_RUN:
-        tasks.append((t("plan_engine", build=LLAMA_BUILD), LLAMA_SIZE_MB / 1024, llama_asset()[0], install_llama))
-    if not profile.path.exists() or DRY_RUN:
-        tasks.append((t("plan_model", file=f"{profile.family}/{profile.file}"), profile.size / 2**30,
-                      profile.url, lambda: install_model(profile)))
+    if not engine_installed(profile.engine) or DRY_RUN:
+        tasks.append(engine_task(profile.engine))
+    if not profile.installed or DRY_RUN:
+        tasks.append((t("plan_model", file=profile.label_path), profile.size / 2**30,
+                      [profile.url], lambda: install_model(profile)))
     if not opencode_binary() or DRY_RUN:
         tasks.append((t("plan_opencode", ver=OPENCODE_VERSION), OPENCODE_SIZE_MB / 1024,
-                      opencode_asset()[0], install_opencode))
+                      [opencode_asset()[0]], install_opencode))
     if tasks:
         total = sum(size for _, size, _, _ in tasks)
         say("\n" + bold(t("plan")))
@@ -1138,7 +1439,7 @@ def ensure_installed(profile: Profile | None) -> Profile:
                 raise Cancelled()
         if not yes_no(t("start"), True):
             raise Cancelled()
-        check_network([url for _, _, url, _ in tasks])
+        check_network([url for _, _, urls, _ in tasks for url in urls])
         for index, (title, _, _, action) in enumerate(tasks, 1):
             step(index, len(tasks), title)
             action()
@@ -1148,7 +1449,11 @@ def ensure_installed(profile: Profile | None) -> Profile:
     return profile
 
 
-def open_chat(port: int) -> None:
+def open_chat(profile: Profile) -> None:
+    if profile.engine == "mlx":
+        say(t("chat_mlx"))
+        return
+    port = bring_up(profile)["port"]
     url = f"http://127.0.0.1:{port}"
     say(t("chat_url", url=url))
     if not DRY_RUN:
@@ -1158,42 +1463,71 @@ def open_chat(port: int) -> None:
 def show_status() -> None:
     alive = running_state()
     profile = saved_profile()
+    installed = lambda flag: t("installed") if flag else t("not_installed")  # noqa: E731
     say(f"\n{t('status_root')}: {ROOT}")
-    say(f"{t('status_engine')}: {t('installed') if server_binary() else t('not_installed')} ({LLAMA_BUILD})")
-    say(f"{t('status_opencode')}: {t('installed') if opencode_binary() else t('not_installed')} ({OPENCODE_VERSION})")
+    say(f"llama.cpp {LLAMA_BUILD}: {installed(server_binary())}")
+    if is_apple_silicon():
+        say(f"MLX (mlx-lm {MLX_LM_VERSION}): {installed(mlx_installed())}")
+    say(f"OpenCode {OPENCODE_VERSION}: {installed(opencode_binary())}")
     say(f"{t('status_server')}: {t('running_on', port=alive['port']) if alive else t('not_running')}")
-    say(f"{t('status_model')}: {profile.path if profile else '—'}")
+    say(f"{t('status_model')}: {f'{profile.key} → {profile.path}' if profile else '—'}")
     say(f"{t('status_log')}: {LOG_FILE}")
+    if BENCH_FILE.exists():
+        say(f"{t('status_bench')}: {BENCH_FILE}")
     if LOG_FILE.exists():
         say(f"{t('status_last')}: {log_tail()}")
 
 
+def _size_of(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def model_entries() -> list[Path]:
+    """GGUF files (and unfinished .part files) plus MLX model folders."""
+    entries = []
+    gguf = MODELS_DIR / "gguf"
+    if gguf.is_dir():
+        entries += sorted(p for p in gguf.glob("*/*") if p.name.endswith((".gguf", ".gguf.part")))
+    mlx = MODELS_DIR / "mlx"
+    if mlx.is_dir():
+        entries += sorted(p for p in mlx.glob("*/*") if p.is_dir())
+    return entries
+
+
 def manage_models() -> None:
     while True:
-        files = sorted(MODELS_DIR.glob("*/*.gguf")) if MODELS_DIR.exists() else []
+        entries = model_entries()
         say("\n" + bold(t("models_title", dir=MODELS_DIR)))
-        if not files:
+        if not entries:
             say("  " + t("models_none"))
             return
-        total = 0
-        for path in files:
-            size = path.stat().st_size
+        labels, total = [], 0
+        for path in entries:
+            size = _size_of(path)
             total += size
-            say(f"  {path.parent.name}/{path.name}  {size_text(size / 2**30)}")
+            label = str(path.relative_to(MODELS_DIR))
+            unfinished = path.name.endswith(".part") or (path.is_dir() and not (path / ".complete").exists())
+            if unfinished:
+                label += f" ({t('models_incomplete')})"
+            labels.append(label)
+            say(f"  {label}  {size_text(size / 2**30)}")
         say(dim("  " + t("models_total", gb=total / 2**30)))
-        options = [t("models_back"), t("models_open")] + [f"{p.parent.name}/{p.name}" for p in files]
-        choice = ask(t("models_pick"), options, 1)
+        choice = ask(t("models_pick"), [t("models_back"), t("models_open")] + labels, 1)
         if choice == 1:
             return
         if choice == 2:
             open_folder(MODELS_DIR)
             continue
-        path = files[choice - 3]
-        alive = running_state()
+        path = entries[choice - 3]
         current = saved_profile()
-        if alive and current and current.path == path:
+        if running_state() and current and path in (current.path, current.path.with_name(current.path.name + ".part")):
             stop_server()
-        path.unlink(missing_ok=True)
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
         if path.parent.exists() and not any(path.parent.iterdir()):
             path.parent.rmdir()
         say(ok(t("models_deleted", file=path.name)))
@@ -1209,7 +1543,7 @@ def uninstall() -> bool:
     return True
 
 
-def run_opencode(profile: Profile) -> Profile:
+def run_opencode(profile: Profile | None) -> Profile:
     profile = ensure_installed(profile)
     state = bring_up(profile)
     launch_opencode(profile, state)
@@ -1217,7 +1551,7 @@ def run_opencode(profile: Profile) -> Profile:
 
 
 def menu(profile: Profile | None) -> None:
-    actions = ["stop_exit", "keep_exit", "opencode", "chat", "switch", "models", "status", "uninstall"]
+    actions = ["stop_exit", "keep_exit", "opencode", "switch", "bench", "chat", "models", "status", "uninstall"]
     while True:
         choice = actions[ask(t("menu_title"), [t("menu." + a) for a in actions], 1) - 1]
         if choice == "stop_exit":
@@ -1227,11 +1561,14 @@ def menu(profile: Profile | None) -> None:
             return
         if choice == "opencode":
             profile = run_opencode(profile)
-        elif choice == "chat":
-            profile = ensure_installed(profile)
-            open_chat(bring_up(profile)["port"])
         elif choice == "switch":
             profile = run_opencode(choose_profile())
+        elif choice == "bench":
+            speed_test(profile or choose_profile())
+            profile = saved_profile()
+        elif choice == "chat":
+            profile = ensure_installed(profile)
+            open_chat(profile)
         elif choice == "models":
             manage_models()
         elif choice == "status":
@@ -1243,6 +1580,7 @@ def menu(profile: Profile | None) -> None:
 def main(argv: list[str]) -> int:
     try:
         banner()
+        migrate_layout()
         profile = saved_profile()
         if "--menu" not in argv:
             profile = run_opencode(profile)
