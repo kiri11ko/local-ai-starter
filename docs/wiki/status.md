@@ -19,7 +19,8 @@
   0.32.2 разрешаются (`--dry-run`) ([mlx-engine](entities/mlx-engine.md)).
 - Обновление при запуске из GitHub Releases: вопрос с заметками, «пропустить версию», git-перемотка на тег,
   замена файлов из ZIP, перезапуск, работа без сети — на поддельном релизе и локальном bare-репозитории
-  ([updater](entities/updater.md)).
+  ([updater](entities/updater.md)). Сквозная проверка на настоящем релизе v2.1.0: копия с `VERSION`
+  2.0.9 предложила 2.1.0 с заметками, скачала архив и перезапустилась на 2.1.0.
 - Разбор потока в замере скорости — на поддельном сервере в обоих форматах ([speed-test](entities/speed-test.md)).
 - OpenCode v1.19.5: установка, конфиг принимается, данные изолированы в `local-ai/opencode-home`
   ([opencode-integration](entities/opencode-integration.md)).
