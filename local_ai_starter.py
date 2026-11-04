@@ -2,7 +2,8 @@
 """Local AI Starter: one click from nothing to OpenCode on a local model.
 
 Run with no arguments: ``python3 local_ai_starter.py`` (or double-click RunMe.*).
-``--menu`` opens the management menu without starting OpenCode.
+``--menu`` opens the management menu without starting OpenCode. Every launch first checks
+GitHub Releases for a newer version (``--no-update`` skips that).
 
 Everything the script downloads or creates lives in the ``local-ai`` folder next to
 it: engines (``engines/llama.cpp``, ``engines/mlx``), models (``models/<engine>/<family>/``),
@@ -32,13 +33,16 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+VERSION = "2.1.0"  # must match the GitHub release tag (vX.Y.Z)
+
 DRY_RUN = os.environ.get("LOCAL_AI_STARTER_DRY_RUN") == "1"
 DEFAULT_PORT = 8080
 NET_CHECK_TIMEOUT = 15   # seconds to wait for a host to answer the pre-flight check
 STALL_TIMEOUT = 30       # seconds without a single byte before a download is retried
 DOWNLOAD_ATTEMPTS = 5
 
-ROOT = Path(os.environ.get("LOCAL_AI_STARTER_HOME") or (Path(__file__).resolve().parent / "local-ai"))
+APP_DIR = Path(__file__).resolve().parent  # the wizard's own files; updates replace them
+ROOT = Path(os.environ.get("LOCAL_AI_STARTER_HOME") or (APP_DIR / "local-ai"))
 ENGINES_DIR = ROOT / "engines"
 LLAMA_DIR = ENGINES_DIR / "llama.cpp"
 MLX_DIR = ENGINES_DIR / "mlx"
@@ -52,6 +56,15 @@ LOG_FILE = ROOT / "server.log"
 BENCH_FILE = ROOT / "benchmarks.csv"
 
 ENGINE_NAMES = {"gguf": "llama.cpp", "mlx": "MLX"}
+
+# Updates come from GitHub Releases only, so unreleased pushes to main never reach users.
+# The two overrides exist for testing against a local server.
+UPDATE_REPO = "kiri11ko/local-ai-starter"
+UPDATE_API = (os.environ.get("LOCAL_AI_STARTER_UPDATE_API")
+              or f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest")
+UPDATE_ZIP = (os.environ.get("LOCAL_AI_STARTER_UPDATE_ZIP")
+              or f"https://github.com/{UPDATE_REPO}/archive/refs/tags/{{tag}}.zip")
+UPDATE_TIMEOUT = 5
 
 # Pinned llama.cpp build: one version for everyone, hashes from the release page.
 LLAMA_BUILD = "b12110"
@@ -197,6 +210,18 @@ STRINGS = {
         "bench_saved": "Saved to {file}",
         "bench_fail": "The speed test failed: {error}",
         "models_incomplete": "incomplete",
+        "update_check_failed": "Could not check for updates, continuing.",
+        "update_available": "Local AI Starter {new} is available (you have {old}).",
+        "update_question": "Update now?",
+        "update_now": "Update now",
+        "update_later": "Not now",
+        "update_skip": "Skip this version",
+        "update_local_changes": "Could not update automatically: this folder has local changes or a different "
+                                "history. Update by hand with git pull (release {tag}).",
+        "update_failed": "The update failed: {error}. Continuing with the current version.",
+        "update_bad_archive": "The release archive does not contain local_ai_starter.py.",
+        "update_done": "Updated to {version}. Models and settings in local-ai/ are kept.",
+        "update_restarting": "Restarting with the new version…",
         "status_bench": "Speed tests",
         "low_ram": "This model wants {need} GB of memory, you have {have:.0f} GB. It may be slow.",
         "continue_anyway": "Continue anyway?",
@@ -312,6 +337,18 @@ STRINGS = {
         "bench_saved": "Записано в {file}",
         "bench_fail": "Замер не удался: {error}",
         "models_incomplete": "не докачано",
+        "update_check_failed": "Не удалось проверить обновления, продолжаю.",
+        "update_available": "Вышла версия Local AI Starter {new} (у вас {old}).",
+        "update_question": "Обновить сейчас?",
+        "update_now": "Обновить сейчас",
+        "update_later": "Не сейчас",
+        "update_skip": "Пропустить эту версию",
+        "update_local_changes": "Не удалось обновить автоматически: в папке есть свои изменения или другая "
+                                "история. Обновите вручную через git pull (релиз {tag}).",
+        "update_failed": "Обновление не удалось: {error}. Продолжаю на текущей версии.",
+        "update_bad_archive": "В архиве релиза нет local_ai_starter.py.",
+        "update_done": "Обновлено до {version}. Модели и настройки в local-ai/ сохранены.",
+        "update_restarting": "Перезапускаю новую версию…",
         "status_bench": "Замеры скорости",
         "low_ram": "Этой модели желательно {need} ГБ памяти, у вас {have:.0f} ГБ. Может работать медленно.",
         "continue_anyway": "Всё равно продолжить?",
@@ -495,7 +532,7 @@ def say(text: str = "") -> None:
 
 
 def banner() -> None:
-    title = f"  {t('title')}  "
+    title = f"  {t('title')} {VERSION}  "
     line = "─" * len(title)
     say(paint(f"╭{line}╮\n│{title}│\n╰{line}╯", "36"))
     say(t("tagline"))
@@ -1054,10 +1091,10 @@ def install_model(profile: Profile) -> None:
 
 # ───────────────────────────── server ─────────────────────────────
 
-def http_json(url: str, payload: dict | None = None, timeout: int = 10):
+def http_json(url: str, payload: dict | None = None, timeout: int = 10, headers: dict | None = None):
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json",
-                                                              "User-Agent": "local-ai-starter"})
+                                                              "User-Agent": "local-ai-starter", **(headers or {})})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.status, json.loads(response.read().decode() or "{}")
 
@@ -1339,6 +1376,120 @@ def launch_opencode(profile: Profile, state: dict) -> None:
         signal.signal(signal.SIGINT, previous)
 
 
+# ───────────────────────────── updates ─────────────────────────────
+
+def _version_tuple(text: str) -> tuple:
+    """'v2.1.0' -> (2, 1, 0); anything unparsable -> () which never counts as newer."""
+    try:
+        return tuple(int(part) for part in text.strip().lstrip("vV").split("."))
+    except ValueError:
+        return ()
+
+
+def check_for_update(argv: list[str]) -> None:
+    """Asks GitHub for the latest release; offers it if it is newer. Never blocks the wizard."""
+    if DRY_RUN or "--no-update" in argv or os.environ.get("LOCAL_AI_STARTER_NO_UPDATE") == "1":
+        return
+    try:
+        _, release = http_json(UPDATE_API, timeout=UPDATE_TIMEOUT, headers={"Accept": "application/vnd.github+json"})
+        tag = str(release.get("tag_name") or "")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        say(dim(t("update_check_failed")))
+        return
+    latest = _version_tuple(tag)
+    if not latest or latest <= _version_tuple(VERSION) or read_state().get("skipped_version") == tag:
+        return
+    say("\n" + bold(t("update_available", new=tag.lstrip("vV"), old=VERSION)))
+    for line in str(release.get("body") or "").strip().splitlines()[:15]:
+        say("  " + line.rstrip())
+    choice = ask(t("update_question"), [t("update_now"), t("update_later"), t("update_skip")], 1)
+    if choice == 2:
+        return
+    if choice == 3:
+        state = read_state()
+        state["skipped_version"] = tag
+        write_state(state)
+        return
+    if apply_update(tag):
+        restart(argv)
+
+
+def apply_update(tag: str) -> bool:
+    try:
+        if (APP_DIR / ".git").exists() and shutil.which("git"):
+            return _update_git(tag)
+        return _update_zip(tag)
+    except (urllib.error.URLError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        say(fail(t("update_failed", error=error)))
+        return False
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(APP_DIR), *args], capture_output=True, text=True, timeout=180)
+
+
+def _update_git(tag: str) -> bool:
+    """Fast-forwards to the release tag (not to main), and only on a clean tree."""
+    status = _git("status", "--porcelain")
+    if status.returncode or status.stdout.strip():
+        say(t("update_local_changes", tag=tag))
+        return False
+    for args in (("fetch", "--tags", "--force", "origin"), ("merge", "--ff-only", f"refs/tags/{tag}")):
+        say(dim("$ git " + " ".join(args)))
+        result = _git(*args)
+        if result.returncode:
+            say(dim((result.stderr or result.stdout).strip()[-400:]))
+            say(t("update_local_changes", tag=tag))
+            return False
+    say(ok(t("update_done", version=tag.lstrip("vV"))))
+    return True
+
+
+def _update_zip(tag: str) -> bool:
+    """Downloads the release archive and replaces changed wizard files; local-ai/ is never touched."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    archive, staging = ROOT / "download-update.zip", ROOT / "update-new"
+    for leftover in (archive, archive.with_name(archive.name + ".part")):
+        leftover.unlink(missing_ok=True)  # never resume a different release
+    download(UPDATE_ZIP.format(tag=tag), archive, None, f"Local AI Starter {tag}")
+    if staging.exists():
+        shutil.rmtree(staging)
+    extract(archive, staging)
+    archive.unlink(missing_ok=True)
+    if not (staging / "local_ai_starter.py").is_file():
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError(t("update_bad_archive"))
+    for source in sorted(staging.rglob("*")):
+        relative = source.relative_to(staging)
+        if not source.is_file() or relative.parts[0] in ("local-ai", ".git"):
+            continue
+        target = APP_DIR / relative
+        if target.is_file() and target.read_bytes() == source.read_bytes():
+            continue  # unchanged: leave it alone (matters for a .bat that is running right now)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".update-tmp")
+        shutil.copyfile(source, temporary)
+        temporary.replace(target)
+    for name in ("RunMe.command", "RunMe.sh"):
+        make_executable(APP_DIR / name)
+    shutil.rmtree(staging, ignore_errors=True)
+    say(ok(t("update_done", version=tag.lstrip("vV"))))
+    return True
+
+
+def restart(argv: list[str]) -> None:
+    """Runs the freshly installed wizard with the same arguments; --no-update prevents a loop."""
+    say(dim(t("update_restarting")))
+    command = [sys.executable, str(APP_DIR / "local_ai_starter.py")]
+    command += [arg for arg in argv if arg != "--no-update"] + ["--no-update"]
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        code = subprocess.call(command)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    raise SystemExit(code)
+
+
 # ───────────────────────────── scenarios ─────────────────────────────
 
 def migrate_layout() -> None:
@@ -1580,6 +1731,7 @@ def menu(profile: Profile | None) -> None:
 def main(argv: list[str]) -> int:
     try:
         banner()
+        check_for_update(argv)
         migrate_layout()
         profile = saved_profile()
         if "--menu" not in argv:

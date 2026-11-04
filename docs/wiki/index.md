@@ -23,12 +23,14 @@ OpenCode на локальной модели в терминале (macOS, Linu
 - [speed-test](entities/speed-test.md) — замер скорости и `benchmarks.csv`
 - [server-lifecycle](entities/server-lifecycle.md) — запуск, контекст, готовность, остановка, `state.json`
 - [opencode-integration](entities/opencode-integration.md) — закреплённый OpenCode, конфиг, изоляция, workspace
+- [updater](entities/updater.md) — проверка и установка новой версии из GitHub Releases
 - [launchers](entities/launchers.md) — `RunMe.command` / `.sh` / `.bat`
 
 ## Рабочие процессы
 
 - [build](workflows/build.md) — запуск, dry-run, переменные окружения
 - [test](workflows/test.md) — проверки и ручной чеклист
+- [release](workflows/release.md) — как выпустить версию, чтобы её получили пользователи
 - [update-llama-build](workflows/update-llama-build.md) — как поднять версию llama.cpp
 - [update-opencode](workflows/update-opencode.md) — как поднять версию OpenCode
 - [update-models](workflows/update-models.md) — как обновить линейку моделей

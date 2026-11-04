@@ -1,6 +1,6 @@
 # Update llama.cpp build
 
-Сборка закреплена в `LLAMA_BUILD` и `LLAMA_SHA256` (`local_ai_starter.py:57-67`), см.
+Сборка закреплена в `LLAMA_BUILD` и `LLAMA_SHA256` (`local_ai_starter.py:70-80`), см.
 [llama-engine](../entities/llama-engine.md).
 
 1. Выбрать релиз на https://github.com/ggml-org/llama.cpp/releases.

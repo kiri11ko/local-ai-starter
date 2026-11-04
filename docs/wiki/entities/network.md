@@ -7,21 +7,21 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 недоступен, докачка вместо перезапуска, проверка целостности.
 
 ## Key API
-- `check_network(urls)` — `local_ai_starter.py:768`. До начала загрузок запрашивает
+- `check_network(urls)` — `local_ai_starter.py:805`. До начала загрузок запрашивает
   `Range: bytes=0-0` у каждого URL с таймаутом `NET_CHECK_TIMEOUT` = 15 с. Так проверяются и
   редиректы на CDN (GitHub → release-assets, Hugging Face → xethub/CDN).
-- `network_error(url, error, sec)` — `local_ai_starter.py:754` и `_net_reason` — `:738`.
+- `network_error(url, error, sec)` — `local_ai_starter.py:791` и `_net_reason` — `:775`.
   Причина по типу исключения: таймаут, DNS (`gaierror`), отказ/сброс, SSL (вероятен перехват
   прокси), HTTP-код. 404/410 — отдельное сообщение «закреплённой версии больше нет», а не
   «сеть заблокирована». К сетевым причинам добавляется совет: другая сеть, VPN, `HTTPS_PROXY`.
-- `download(url, target, sha256, name)` — `local_ai_starter.py:804`. `sha256=None` — без проверки
+- `download(url, target, sha256, name)` — `local_ai_starter.py:841`. `sha256=None` — без проверки
   (мелкие файлы MLX-репозитория). Пишет в `<target>.part`,
   докачивает через `Range`. Если сервер ответил 200 вместо 206, начинает заново; 416 значит
   «уже скачано». `STALL_TIMEOUT` = 30 с на чтение, до `DOWNLOAD_ATTEMPTS` = 5 повторов подряд
   (счётчик сбрасывается, как только пошли байты). SHA-256 проверяется до переименования.
-- `_progress` — `local_ai_starter.py:784`: полоса, %, объём, скорость, оставшееся время;
+- `_progress` — `local_ai_starter.py:821`: полоса, %, объём, скорость, оставшееся время;
   перерисовка не чаще раза в 0,3 с.
-- `extract` / `_write_members` — `local_ai_starter.py:864`, `:883`. Снимают общую верхнюю
+- `extract` / `_write_members` — `local_ai_starter.py:901`, `:920`. Снимают общую верхнюю
   папку, отклоняют пути и цели symlink-ов за пределами папки, воссоздают symlink-и из tar.
 
 ## Collaborators

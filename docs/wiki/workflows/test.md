@@ -27,6 +27,11 @@ printf '\n\n1\n' | LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d
 - **Замер скорости**: поддельный SSE-сервер, отдающий дельты `reasoning_content` (как llama.cpp)
   или `reasoning` (как MLX) и `usage`; `_stream_completion` должен посчитать токены и TTFT.
 - **Переезд раскладки**: создать `bin/llama-server` и `models/qwen/*.gguf.part`, вызвать `migrate_layout()`.
+- **Обновление**: `LOCAL_AI_STARTER_UPDATE_API` на локальный `http.server` с `latest.json`
+  (`tag_name`, `body`) и `LOCAL_AI_STARTER_UPDATE_ZIP='http://127.0.0.1:<port>/{tag}.zip'` (архив с
+  верхней папкой `local-ai-starter-<ver>/`); проверить «не сейчас», «пропустить», ZIP-замену и
+  перезапуск на копии без `.git`, git-режим — на клоне локального bare-репозитория с тегом и
+  лишним коммитом после него ([updater](../entities/updater.md)).
 - **Изоляция OpenCode**: `HOME=<пустая папка>`, `opencode models local-ai-starter` и
   `opencode debug config` с `opencode_env()` — в HOME ничего от OpenCode.
 

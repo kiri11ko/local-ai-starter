@@ -1,6 +1,6 @@
 # Update OpenCode
 
-Версия закреплена в `OPENCODE_VERSION` и `OPENCODE_SHA256` (`local_ai_starter.py:79-89`), см.
+Версия закреплена в `OPENCODE_VERSION` и `OPENCODE_SHA256` (`local_ai_starter.py:92-102`), см.
 [opencode-integration](../entities/opencode-integration.md).
 
 1. Найти релиз: `gh release view --repo anomalyco/opencode` (репозиторий раньше назывался `sst/opencode`).

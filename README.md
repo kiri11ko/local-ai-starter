@@ -96,6 +96,21 @@ calling, which OpenCode depends on. To compare them on your machine:
 3. Repeat with the other engine and the same model, then compare. Also try a real
    task in OpenCode: speed is not everything if tool calls fail.
 
+## Updates
+
+Every launch first asks GitHub whether a newer release of Local AI Starter is out
+(5 seconds at most; without internet it just says so and goes on). If there is one,
+you see what's new and choose: **Update now** (Enter), **Not now**, or **Skip this
+version**. After updating, the wizard restarts on the new version. Models, engines and
+settings in `local-ai/` are never touched by an update.
+
+- Folder cloned with git: the wizard fast-forwards to the release tag (`git merge --ff-only`).
+  If you changed files yourself, it leaves them alone and suggests `git pull`.
+- Folder downloaded as a ZIP: the wizard downloads the release archive and replaces
+  its own files.
+- Only published releases count; work in progress on `main` is never offered.
+- `--no-update` or `LOCAL_AI_STARTER_NO_UPDATE=1` skips the check.
+
 ## Settings
 
 | Variable | What it does |
@@ -103,6 +118,7 @@ calling, which OpenCode depends on. To compare them on your machine:
 | `LOCAL_AI_STARTER_LANG=en\|ru` | force the wizard language |
 | `LOCAL_AI_STARTER_HOME=<path>` | keep data somewhere other than `local-ai/` |
 | `LOCAL_AI_STARTER_DRY_RUN=1` | walk through the flow without downloading or starting anything |
+| `LOCAL_AI_STARTER_NO_UPDATE=1` | do not check for updates on launch |
 | `HTTPS_PROXY` | standard proxy setting, honoured for all downloads |
 
 ## Limits

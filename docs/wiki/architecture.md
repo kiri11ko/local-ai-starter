@@ -8,22 +8,24 @@ Python 3.9+. Внешние процессы: локальный сервер м
 
 | Строки | Слой | Страница |
 |---|---|---|
-| `local_ai_starter.py:35-89` | константы, пути, закреплённые llama.cpp, uv/mlx-lm, OpenCode | [llama-engine](entities/llama-engine.md), [mlx-engine](entities/mlx-engine.md), [opencode-integration](entities/opencode-integration.md) |
-| `local_ai_starter.py:92-158` | `Profile`, `_MODELS`, `PROFILES` | [profiles](entities/profiles.md) |
-| `local_ai_starter.py:163-434` | `STRINGS`, `detect_lang`, `t`, `size_text` | [i18n](entities/i18n.md) |
-| `local_ai_starter.py:437-613` | терминал: ANSI, цвета, меню со стрелками | [terminal-ui](entities/terminal-ui.md) |
-| `local_ai_starter.py:617-735` | система, порты, PID, `state.json` | [server-lifecycle](entities/server-lifecycle.md) |
-| `local_ai_starter.py:738-920` | сеть: проверка, докачка, SHA-256, распаковка | [network](entities/network.md) |
-| `local_ai_starter.py:924-1054` | компоненты: движки, OpenCode, модели | [llama-engine](entities/llama-engine.md), [mlx-engine](entities/mlx-engine.md) |
-| `local_ai_starter.py:1057-1206` | сервер | [server-lifecycle](entities/server-lifecycle.md) |
-| `local_ai_starter.py:1209-1281` | замер скорости | [speed-test](entities/speed-test.md) |
-| `local_ai_starter.py:1284-1341` | OpenCode: конфиг, рабочая папка, изоляция, запуск | [opencode-integration](entities/opencode-integration.md) |
-| `local_ai_starter.py:1344-1600` | переезд раскладки, сценарии, меню, `main` | [wizard-flow](entities/wizard-flow.md) |
+| `local_ai_starter.py:36-102` | константы, пути, закреплённые llama.cpp, uv/mlx-lm, OpenCode | [llama-engine](entities/llama-engine.md), [mlx-engine](entities/mlx-engine.md), [opencode-integration](entities/opencode-integration.md) |
+| `local_ai_starter.py:105-171` | `Profile`, `_MODELS`, `PROFILES` | [profiles](entities/profiles.md) |
+| `local_ai_starter.py:176-471` | `STRINGS`, `detect_lang`, `t`, `size_text` | [i18n](entities/i18n.md) |
+| `local_ai_starter.py:474-650` | терминал: ANSI, цвета, меню со стрелками | [terminal-ui](entities/terminal-ui.md) |
+| `local_ai_starter.py:654-772` | система, порты, PID, `state.json` | [server-lifecycle](entities/server-lifecycle.md) |
+| `local_ai_starter.py:775-957` | сеть: проверка, докачка, SHA-256, распаковка | [network](entities/network.md) |
+| `local_ai_starter.py:961-1091` | компоненты: движки, OpenCode, модели | [llama-engine](entities/llama-engine.md), [mlx-engine](entities/mlx-engine.md) |
+| `local_ai_starter.py:1094-1243` | сервер | [server-lifecycle](entities/server-lifecycle.md) |
+| `local_ai_starter.py:1246-1318` | замер скорости | [speed-test](entities/speed-test.md) |
+| `local_ai_starter.py:1321-1378` | OpenCode: конфиг, рабочая папка, изоляция, запуск | [opencode-integration](entities/opencode-integration.md) |
+| `local_ai_starter.py:1381-1491` | обновление из GitHub Releases | [updater](entities/updater.md) |
+| `local_ai_starter.py:1495-1751` | переезд раскладки, сценарии, меню, `main` | [wizard-flow](entities/wizard-flow.md) |
 
 ## Поток запуска
 
 ```
 main
+  check_for_update                     GitHub Releases, 5 с; новее VERSION -> спросить -> обновить и перезапуститься
   migrate_layout                       раскладка v2 -> v3 на месте
   run_opencode(saved_profile)          (пропускается при --menu)
     ensure_installed
@@ -39,7 +41,7 @@ main
 
 ## Папка данных
 
-Корень — `ROOT` (`local_ai_starter.py:41`): `local-ai/` рядом со скриптом или
+Корень — `ROOT` (`local_ai_starter.py:45`): `local-ai/` рядом со скриптом или
 `LOCAL_AI_STARTER_HOME`. Вне неё мастер ничего не пишет. Движки и модели разных
 движков лежат в разных папках и друг друга не перетирают.
 
@@ -63,6 +65,6 @@ local-ai/
 - Пользователь не технический: меню со стрелками, Enter выбирает рекомендуемое
   ([terminal-ui](entities/terminal-ui.md)). Язык интерфейса — по системе ([i18n](entities/i18n.md)).
 - Ожидаемые ошибки: `RuntimeError` с текстом через `t()`, сетевые — `NetworkError`. `main`
-  печатает их и возвращает 1 (`local_ai_starter.py:1580`).
+  печатает их и возвращает 1 (`local_ai_starter.py:1731`).
 - Всё, что качается, закреплено версией или коммитом и проверяется по SHA-256 ([network](entities/network.md)).
 - Сервер слушает только `127.0.0.1`.

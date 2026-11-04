@@ -17,6 +17,9 @@
 - Линейка Qwen3.5/3.6/3.8 для обоих движков с рекомендацией по памяти ([profiles](entities/profiles.md)).
 - Среда MLX: uv 0.13.1 и CPython 3.12.15 ставятся внутрь `engines/mlx/`, зависимости mlx-lm
   0.32.2 разрешаются (`--dry-run`) ([mlx-engine](entities/mlx-engine.md)).
+- Обновление при запуске из GitHub Releases: вопрос с заметками, «пропустить версию», git-перемотка на тег,
+  замена файлов из ZIP, перезапуск, работа без сети — на поддельном релизе и локальном bare-репозитории
+  ([updater](entities/updater.md)).
 - Разбор потока в замере скорости — на поддельном сервере в обоих форматах ([speed-test](entities/speed-test.md)).
 - OpenCode v1.19.5: установка, конфиг принимается, данные изолированы в `local-ai/opencode-home`
   ([opencode-integration](entities/opencode-integration.md)).

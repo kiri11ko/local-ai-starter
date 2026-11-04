@@ -6,13 +6,13 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 Линейка моделей, одинаковая для обоих движков, раскладка на диске и выбор рекомендуемой по памяти.
 
 ## Key API
-- `Profile` — `local_ai_starter.py:93`: `key`, `base` (имя модели без движка → подпись
+- `Profile` — `local_ai_starter.py:106`: `key`, `base` (имя модели без движка → подпись
   `model.<base>` в [i18n](i18n.md)), `engine` (`gguf`/`mlx`), `family`, `repo`, `file`
   (GGUF — имя файла, MLX — закреплённый коммит репозитория), `quant`, `size`, `sha256` (только GGUF),
   `min_ram_gb`. Свойства: `path`, `label_path`, `url` (GGUF — `resolve/main/<file>`, MLX —
   `api/models/<repo>/tree/<commit>?recursive=1`), `installed` (GGUF — файл есть, MLX — маркер `.complete`).
-- `_gguf` / `_mlx` — `local_ai_starter.py:125`, `:130`. Ключи `<base>` и `<base>-mlx`.
-- `_MODELS` — `local_ai_starter.py:136`, от меньшей к большей:
+- `_gguf` / `_mlx` — `local_ai_starter.py:138`, `:143`. Ключи `<base>` и `<base>-mlx`.
+- `_MODELS` — `local_ai_starter.py:149`, от меньшей к большей:
 
   | base | GGUF | MLX (mlx-community) | Память |
   |---|---|---|---|
@@ -22,7 +22,7 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
   | `qwen3.6-35b-a3b` | ggml-org Q4_K_M, 19,0 ГБ | 4-bit, 19,0 ГБ | 48 |
   | `qwen3.6-35b-a3b-q8` | ggml-org Q8_0, 34,4 ГБ | 8-bit, 35,2 ГБ | 64 |
 
-- `choose_profile()` — `local_ai_starter.py:1387`: сначала `choose_engine()` ([wizard-flow](wizard-flow.md)),
+- `choose_profile()` — `local_ai_starter.py:1538`: сначала `choose_engine()` ([wizard-flow](wizard-flow.md)),
   затем рекомендует самую крупную модель с `min_ram_gb` ≤ RAM (неизвестная RAM считается как 16).
   Уже скачанные помечены ✓.
 - Архитектуры GGUF — `qwen35` и `qwen35moe`; закреплённый llama.cpp b12110 их знает (проверено

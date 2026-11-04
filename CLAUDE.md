@@ -27,6 +27,8 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
 - `LOCAL_AI_STARTER_DRY_RUN=1`: downloads, installs and process starts are printed as `[dry-run] …`.
 - `LOCAL_AI_STARTER_HOME`: data dir instead of `local-ai/` next to the script (git-ignored).
 - `LOCAL_AI_STARTER_LANG=en|ru`: force the UI language.
+- `--no-update` / `LOCAL_AI_STARTER_NO_UPDATE=1`: skip the update check. `LOCAL_AI_STARTER_UPDATE_API`
+  and `LOCAL_AI_STARTER_UPDATE_ZIP` (`{tag}` placeholder) point it at a local fake release for tests.
 - Piped stdin, or a terminal without ANSI support, switches menus to numbered `input()`.
   That is how to script the dry run: `printf '\n\n1\n' | …`.
 - To test installs without the network, serve archives with `python3 -m http.server` and
@@ -40,6 +42,11 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
   It asks for a profile only if none is saved, plans only the missing pieces, then runs
   `check_network()`, downloads, `bring_up()` and `launch_opencode()`. After OpenCode exits,
   the management menu opens. `--menu` skips straight to it.
+- **Updates (`check_for_update` → `apply_update` → `restart`)**: the first step of `main`.
+  It reads GitHub Releases `latest` (5 s timeout; any failure is one dim line, never fatal) and
+  offers only a strictly newer tag than `VERSION`. A git checkout gets `git merge --ff-only <tag>`
+  on a clean tree; a ZIP folder gets the release archive with changed files replaced. Then the
+  wizard re-runs itself with `--no-update`. `local-ai/` is never touched.
 - **Errors**: raise `RuntimeError` with a `t(...)` message for expected failures and
   `NetworkError` for unreachable hosts. `network_error()` explains the cause (timeout / DNS /
   refused / TLS / HTTP; 404 means the pin is gone, not that the network is blocked).
@@ -82,6 +89,9 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
   uses `tasklist`), keys come from `msvcrt`, ANSI is enabled via `SetConsoleMode`, and stopping
   uses `taskkill /T` instead of `killpg`.
 - `README.md` (English, primary) and `README.ru.md` must be kept in sync.
+- Releasing: bump `VERSION` to match the new tag, commit, push, then `gh release create vX.Y.Z`.
+  Users read the release notes in the update prompt, so show the notes to the user before
+  publishing. Procedure: `docs/wiki/workflows/release.md`.
 
 ## LLM Wiki Schema
 
@@ -91,8 +101,8 @@ this file is the schema. Start from `docs/wiki/index.md`; current state is in `d
 
 - Structure: `index.md`, `log.md` (append-only), `status.md`, `architecture.md`,
   `debugging_log.md`, `entities/` (wizard-flow, terminal-ui, i18n, network, profiles,
-  llama-engine, mlx-engine, server-lifecycle, speed-test, opencode-integration, launchers),
-  `workflows/` (build, test, update-llama-build, update-opencode, update-models).
+  llama-engine, mlx-engine, server-lifecycle, speed-test, opencode-integration, launchers, updater),
+  `workflows/` (build, test, release, update-llama-build, update-opencode, update-models).
 - Ingest: new info → its one canonical page → dated `log.md` entry → `status.md` if affected.
   Query: wiki first, code as fallback, file the answer back. Lint: contradictions, stale
   `file:line` refs, orphans, missing links. Full procedures are in the `/wiki` command.
