@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Local AI Starter: one click from nothing to OpenCode on a local model.
+"""Local AI Starter: one click from nothing to local AI: code (OpenCode), images, video, speech.
 
-Run with no arguments: ``python3 local_ai_starter.py`` (or double-click RunMe.*).
-``--menu`` opens the management menu without starting OpenCode. Every launch first checks
-GitHub Releases for a newer version (``--no-update`` skips that).
+Run with no arguments: ``python3 local_ai_starter.py`` (or double-click RunMe.*). The start
+menu lists every downloaded configuration; ``--menu`` opens the management menu instead.
+Every launch first checks GitHub Releases for a newer version (``--no-update`` skips that).
+Test cases from ``test-cases/`` run on the downloaded models and are measured by the wizard.
 
 Everything the script downloads or creates lives in the ``local-ai`` folder next to
-it: engines (``engines/llama.cpp``, ``engines/mlx``), models (``models/<engine>/<family>/``),
-OpenCode, its settings, the workspace, the log and speed-test results. Deleting that folder removes everything. The server listens on 127.0.0.1
+it: engines (``engines/llama.cpp``, ``engines/mlx``, ``engines/stable-diffusion.cpp``), models
+(``models/<engine>/...``), OpenCode, its settings, the workspace, generated files, test runs,
+logs and results. Deleting that folder removes everything. The server listens on 127.0.0.1
 only. PATH, shell configs and global OpenCode settings are never touched.
 """
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
 import platform
+import shlex
 import shutil
 import signal
 import socket
@@ -24,10 +28,12 @@ import ssl
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 import webbrowser
 import zipfile
 from dataclasses import dataclass
@@ -46,6 +52,7 @@ ROOT = Path(os.environ.get("LOCAL_AI_STARTER_HOME") or (APP_DIR / "local-ai"))
 ENGINES_DIR = ROOT / "engines"
 LLAMA_DIR = ENGINES_DIR / "llama.cpp"
 MLX_DIR = ENGINES_DIR / "mlx"
+SD_DIR = ENGINES_DIR / "stable-diffusion.cpp"
 MODELS_DIR = ROOT / "models"
 OPENCODE_DIR = ROOT / "opencode"
 OPENCODE_HOME = ROOT / "opencode-home"
@@ -54,8 +61,15 @@ WORKSPACE_DIR = ROOT / "workspace"
 STATE_FILE = ROOT / "state.json"
 LOG_FILE = ROOT / "server.log"
 BENCH_FILE = ROOT / "benchmarks.csv"
+OUTPUTS_DIR = ROOT / "outputs"          # images, videos and speech made in a generation session
+VOICES_DIR = ROOT / "voices"            # optional speaker reference (wav/mp3) for speech
+GEN_LOG = ROOT / "generate.log"
+TEST_CASES_DIR = APP_DIR / "test-cases"  # shipped with the wizard, replaced by updates
+TEST_RUNS_DIR = ROOT / "test-runs"
+RESULTS_DIR = ROOT / "test-results"
 
-ENGINE_NAMES = {"gguf": "llama.cpp", "mlx": "MLX"}
+ENGINE_NAMES = {"gguf": "llama.cpp", "mlx": "MLX", "sd": "stable-diffusion.cpp", "tts": "llama.cpp"}
+KINDS = ["code", "image", "video", "speech"]
 
 # Updates come from GitHub Releases only, so unreleased pushes to main never reach users.
 # The two overrides exist for testing against a local server.
@@ -88,6 +102,21 @@ MLX_LM_VERSION = "0.32.2"
 MLX_PYPI_URL = f"https://pypi.org/pypi/mlx-lm/{MLX_LM_VERSION}/json"
 MLX_SIZE_MB = 300  # uv + Python + mlx, mlx-lm and their dependencies, roughly
 
+# Pinned stable-diffusion.cpp build for images and video. The macOS archive is universal (arm64 + x86_64, Metal).
+SD_BUILD = "master-1050-58bb3c1"
+SD_URL = "https://github.com/leejet/stable-diffusion.cpp/releases/download/{build}/{name}"
+SD_ASSETS = {  # llama_platform() key -> (asset, SHA-256)
+    "macos-arm64": ("sd-master-58bb3c1-bin-Darwin-macOS-26.6.2-arm64.zip",
+                    "7f295ccdc3a228c95e36b0221b59ba7dd125a023fe00f1ccfd827f1138f8882d"),
+    "macos-x64": ("sd-master-58bb3c1-bin-Darwin-macOS-26.6.2-arm64.zip",
+                  "7f295ccdc3a228c95e36b0221b59ba7dd125a023fe00f1ccfd827f1138f8882d"),
+    "ubuntu-x64": ("sd-master-58bb3c1-bin-Linux-Ubuntu-26.04-x86_64.zip",
+                   "35ba046d8da9d07f7d4ce4c9864594a291a994a82ce93fbae1222ac4709ce8f1"),
+    "win-cpu-x64": ("sd-master-58bb3c1-bin-win-cpu-x64.zip",
+                    "b1d1384e9e6434dff9b59d2f2969c5fcfde8cfd4ecf3f3e43aa811899452f161"),
+}
+SD_SIZE_MB = 40
+
 # Pinned OpenCode CLI build, same idea: official GitHub release asset + SHA-256.
 OPENCODE_VERSION = "v1.19.5"
 OPENCODE_URL = "https://github.com/anomalyco/opencode/releases/download/{ver}/opencode-{plat}.{ext}"
@@ -103,10 +132,30 @@ OPENCODE_SIZE_MB = 80
 
 
 @dataclass(frozen=True)
+class Component:
+    """One file of a multi-file model (diffusion model, VAE, text encoder, ...), pinned to a repo commit."""
+    engine: str   # folder under models/: "sd" or "tts"; files shared by several profiles live there once
+    flag: str     # command-line flag that takes this file, e.g. --diffusion-model
+    repo: str
+    rev: str      # pinned commit of the repository
+    file: str     # path inside the repository
+    size: int
+    sha256: str
+
+    @property
+    def path(self) -> Path:
+        return MODELS_DIR / self.engine / self.file.rsplit("/", 1)[-1]
+
+    @property
+    def url(self) -> str:
+        return f"https://huggingface.co/{self.repo}/resolve/{self.rev}/{self.file}"
+
+
+@dataclass(frozen=True)
 class Profile:
     key: str          # unique id, kept in state.json; llama-server --alias
     base: str         # model name shared by both engines, picks the label in STRINGS
-    engine: str       # "gguf" (llama.cpp) or "mlx"
+    engine: str       # "gguf" (llama.cpp), "mlx", "sd" (stable-diffusion.cpp) or "tts" (llama-tts)
     family: str       # folder under models/<engine>/
     repo: str         # Hugging Face repository
     file: str         # gguf: file name; mlx: pinned commit of the repository
@@ -114,25 +163,47 @@ class Profile:
     size: int         # bytes
     sha256: str       # gguf only; MLX files are checked against the LFS hashes of the pinned commit
     min_ram_gb: int
+    kind: str = "code"          # code | image | video | speech
+    components: tuple = ()      # media models: Component files, passed to the engine by their flags
+    args: tuple = ()            # media models: default generation arguments
+    mac_args: tuple = ()        # extra arguments on macOS only
+    ext: str = ""               # media models: output file extension
 
     @property
     def path(self) -> Path:
+        if self.components:
+            return MODELS_DIR / self.engine
         name = self.file if self.engine == "gguf" else self.repo.split("/")[-1]
         return MODELS_DIR / self.engine / self.family / name
 
     @property
     def label_path(self) -> str:
+        if self.components:
+            return f"{self.engine}/ ({', '.join(c.path.name for c in self.missing)})"
         return str(self.path.relative_to(MODELS_DIR))
 
     @property
     def url(self) -> str:
+        if self.components:
+            return self.components[0].url
         if self.engine == "gguf":
             return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
         return f"https://huggingface.co/api/models/{self.repo}/tree/{self.file}?recursive=1"
 
     @property
+    def missing(self) -> list:
+        return [c for c in self.components if not c.path.is_file()]
+
+    @property
     def installed(self) -> bool:
+        if self.components:
+            return not self.missing
         return self.path.is_file() if self.engine == "gguf" else (self.path / ".complete").exists()
+
+    @property
+    def name(self) -> str:
+        """Short model name: the part of its label before the colon."""
+        return t("model." + self.base).split(":")[0]
 
 
 def _gguf(base, repo, file, quant, size, sha256, ram):
@@ -143,6 +214,26 @@ def _gguf(base, repo, file, quant, size, sha256, ram):
 def _mlx(base, repo, commit, quant, size, ram):
     return Profile(f"{base}-mlx", base, "mlx", "qwen", repo, commit, quant, size, "", ram)
 
+
+def _media(key, kind, engine, quant, ram, components, args, ext, mac_args=()):
+    return Profile(key, key, engine, "", "", "", quant, sum(c.size for c in components), "", ram,
+                   kind, tuple(components), tuple(args), tuple(mac_args), ext)
+
+
+# Media files. Shared ones (Flux VAE, umt5 encoder, TTS codec) are downloaded once.
+_AE = Component("sd", "--vae", "Comfy-Org/z_image_turbo", "6fc90a3b1b653e935a0d175e260736de25b84df5",
+                "split_files/vae/ae.safetensors", 335304388,
+                "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38")
+_UMT5 = Component("sd", "--t5xxl", "city96/umt5-xxl-encoder-gguf", "b535255bee98c2b0a59ea7c0ae2dcd0c6657b3b7",
+                  "umt5-xxl-encoder-Q8_0.gguf", 6043068256,
+                  "2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc")
+_TTS_CODEC = Component("tts", "-mm", "ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF", "ca27d74bc954b73dadab5b71ca265d87fc861a7c",
+                       "mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf", 446422912,
+                       "6fd65188839bcd6ecc91b277ad471e22a0edfada4699a0fe82f1165c18cfcce2")
+_WAN_NEGATIVE = ("static, blurry, overexposed, low quality, jpeg artifacts, subtitles, deformed, "
+                 "extra fingers, bad hands, bad face, frozen frame, cluttered background")
+_VIDEO_ARGS = ("-M", "vid_gen", "--cfg-scale", "6.0", "--sampling-method", "euler", "--steps", "20",
+               "-W", "832", "-H", "480", "--video-frames", "33", "--flow-shift", "3.0", "-n", _WAN_NEGATIVE)
 
 # Ordered from small to large; the recommendation is the largest one that fits the memory.
 # GGUF and MLX lines mirror each other, so both engines can be compared on the same model.
@@ -167,6 +258,60 @@ _MODELS = [
          "4-bit", 20429169263, 48),
     _mlx("qwen3.6-35b-a3b-q8", "mlx-community/Qwen3.6-35B-A3B-8bit", "e06a74e6236a60c8367e1a3214e83d8b61b637b0",
          "8-bit", 37748367994, 64),
+    _media("sd-turbo", "image", "sd", "fp32", 8, [
+        Component("sd", "-m", "stabilityai/sd-turbo", "b261bac6fd2cf515557d5d0707481eafa0485ec2",
+                  "sd_turbo.safetensors", 5214561328,
+                  "3f067a1b943cf162f2b8f8588f6cf5824bd5b4c7d1d88d87164b9ca123616549")],
+        ("--cfg-scale", "1.0", "--sampling-method", "euler_a", "--steps", "4", "-W", "512", "-H", "512"), "png"),
+    _media("flux-schnell", "image", "sd", "Q4_K", 16, [
+        Component("sd", "--diffusion-model", "leejet/FLUX.1-schnell-gguf", "c7f665ddaf9f197ff493f41fc211f5480f5f19ac",
+                  "flux1-schnell-q4_k.gguf", 6884606880,
+                  "619697cc4c2bf587416aa1afa98d474a44c80eb4e3a3f64ea8f99ab0ed9adb7a"),
+        _AE,
+        Component("sd", "--clip_l", "comfyanonymous/flux_text_encoders", "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+                  "clip_l.safetensors", 246144152,
+                  "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"),
+        Component("sd", "--t5xxl", "city96/t5-v1_1-xxl-encoder-gguf", "005a6ea51a7d0b84d677b3e633bb52a8c85a83d9",
+                  "t5-v1_1-xxl-encoder-Q4_K_M.gguf", 2896123072,
+                  "6be2b0b7e2de7cf2919340c88cb802a103a997ce46c53131cec91958c1db1af4")],
+        ("--cfg-scale", "1.0", "--sampling-method", "euler", "--steps", "4", "-W", "1024", "-H", "1024"), "png",
+        # On Metal the Flux VAE decodes to NaN and the image comes out blank white, so it runs on the CPU.
+        mac_args=("--backend", "vae=cpu")),
+    _media("z-image-turbo", "image", "sd", "Q8_0", 24, [
+        Component("sd", "--diffusion-model", "leejet/Z-Image-Turbo-GGUF", "c61c0e422dc8b541b7548cf33a4ef8302b0f8085",
+                  "z_image_turbo-Q8_0.gguf", 6577440704,
+                  "df1c5baa86d1398c979495a6072dbcee79444fdb884a2445582ba0769c44e9a1"),
+        _AE,
+        Component("sd", "--llm", "unsloth/Qwen3-4B-Instruct-2507-GGUF", "a06e946bb6b655725eafa393f4a9745d460374c9",
+                  "Qwen3-4B-Instruct-2507-Q8_0.gguf", 4280405600,
+                  "391c1e410fd9f4cf2de2b510273b56a84c19ce18f4fa3bfb3774031dac4ef068")],
+        ("--cfg-scale", "1.0", "--steps", "8", "-W", "1024", "-H", "1024"), "png", mac_args=("--backend", "vae=cpu")),
+    _media("wan2.1-1.3b", "video", "sd", "Q8_0", 16, [
+        Component("sd", "--diffusion-model", "calcuis/wan-1.3b-gguf", "0652f175f44055eb60cca26dd7cd89c14abe22ce",
+                  "wan2.1_t2v_1.3b-q8_0.gguf", 1587083488,
+                  "e6db35de304f0b5b4b4689d41b95fa853fff747581bea75adac25939a73dbead"),
+        Component("sd", "--vae", "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",
+                  "split_files/vae/wan_2.1_vae.safetensors", 253815318,
+                  "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),
+        _UMT5], _VIDEO_ARGS + ("--fps", "16"), "webm"),
+    _media("wan2.2-5b", "video", "sd", "Q8_0", 32, [
+        Component("sd", "--diffusion-model", "QuantStack/Wan2.2-TI2V-5B-GGUF", "57437632ddd08bdcbd1508c866aa22e126ed51d2",
+                  "Wan2.2-TI2V-5B-Q8_0.gguf", 5400179040,
+                  "57bece983817ab2f957546683bb670f13be7d99022d45674840cd999a050ea8f"),
+        Component("sd", "--vae", "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", "ee6f4a40737a995bf5818954cfce6d59443b0f04",
+                  "split_files/vae/wan2.2_vae.safetensors", 1409400960,
+                  "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
+        _UMT5], _VIDEO_ARGS + ("--fps", "24"), "webm"),
+    _media("qwen3-tts-1.7b", "speech", "tts", "Q4_K_M", 8, [
+        Component("tts", "-m", "ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF", "ca27d74bc954b73dadab5b71ca265d87fc861a7c",
+                  "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf", 1035965280,
+                  "8d18c94acb2addd042f97da63c98be144eafa76d0d9495177eab65130cf85129"),
+        _TTS_CODEC], (), "wav"),
+    _media("qwen3-tts-1.7b-q8", "speech", "tts", "Q8_0", 16, [
+        Component("tts", "-m", "ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF", "ca27d74bc954b73dadab5b71ca265d87fc861a7c",
+                  "Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf", 1847874400,
+                  "ac7931aeb2e7aad1a6ed6602d353a5679c9d096b18ce8204ac730a8408d572e1"),
+        _TTS_CODEC], (), "wav"),
 ]
 PROFILES = {profile.key: profile for profile in _MODELS}
 
@@ -188,7 +333,7 @@ STRINGS = {
         "system_check": "Checking your computer",
         "system": "System", "memory": "Memory", "disk_free": "Free disk space",
         "unknown": "unknown",
-        "pick_model": "Which model should the assistant use?",
+        "pick_model": "Which model should we use?",
         "model.qwen3.5-4b": "Qwen3.5 4B: fast, fits 8 GB",
         "model.qwen3.5-9b": "Qwen3.5 9B: balanced, 16 GB",
         "model.qwen3.8-27b": "Qwen3.8 27B: newest and smartest, slower, 32 GB",
@@ -278,7 +423,7 @@ STRINGS = {
         "menu.keep_exit": "Exit, keep the server running",
         "menu.opencode": "Back to OpenCode",
         "menu.chat": "Open the web chat in the browser",
-        "menu.switch": "Switch model or engine",
+        "menu.switch": "Another configuration: download or switch",
         "menu.models": "Models on disk",
         "menu.status": "Status and log",
         "menu.uninstall": "Delete everything that was downloaded",
@@ -297,6 +442,68 @@ STRINGS = {
         "uninstall_warn": "The whole folder {root} will be deleted: engines, models, OpenCode, the workspace and speed tests.",
         "uninstall_confirm": "Delete everything?",
         "uninstall_done": "Done. Nothing else is left on the system.",
+        "model.sd-turbo": "SD-Turbo: fastest, 512 px, fits 8 GB",
+        "model.flux-schnell": "Flux.1 schnell: detailed 1024 px pictures, 16 GB",
+        "model.z-image-turbo": "Z-Image Turbo: best quality, readable text in pictures, 24 GB",
+        "model.wan2.1-1.3b": "Wan 2.1 1.3B: 2-second clips at 832×480, 16 GB",
+        "model.wan2.2-5b": "Wan 2.2 5B: smoother motion, 32 GB",
+        "model.qwen3-tts-1.7b": "Qwen3-TTS 1.7B: speech in 10 languages including Russian, 8 GB",
+        "model.qwen3-tts-1.7b-q8": "Qwen3-TTS 1.7B, 8-bit: cleaner voice, 16 GB",
+        "kind.code": "Code", "kind.image": "Images", "kind.video": "Video", "kind.speech": "Speech",
+        "pick_kind": "What do you want to do?",
+        "pick_kind.code": "Write code with an assistant (OpenCode)",
+        "pick_kind.image": "Generate images from a description",
+        "pick_kind.video": "Generate short videos from a description",
+        "pick_kind.speech": "Turn text into speech",
+        "start_title": "What should we start?",
+        "start.run": "Start: {what}",
+        "start.new": "Download a new configuration",
+        "start.tests": "Test cases: compare the downloaded models",
+        "start.menu": "Management menu",
+        "start.exit": "Exit",
+        "plan_sd": "stable-diffusion.cpp engine {build}",
+        "no_sd_binary": "sd-cli is missing from the archive; the build layout may have changed.",
+        "no_tts_binary": "llama-tts is missing from the llama.cpp archive; the build layout may have changed.",
+        "media_unsupported": "Images and video are not available on {plat} yet.",
+        "gen_intro": "{what}. Type and press Enter; an empty line goes back.",
+        "gen_prompt.image": "Describe the picture (English works best)",
+        "gen_prompt.video": "Describe the scene and the motion (English works best)",
+        "gen_prompt.speech": "Text to read aloud",
+        "gen_example.image": "For example: a red fox in a snowy forest at sunrise, photo",
+        "gen_example.video": "For example: a cat walks along a sunny windowsill, slow camera pan",
+        "gen_example.speech": "For example: Hello! This voice is made on your own computer.",
+        "gen_running": "Generating. Loading the model takes a while, a video takes several minutes…",
+        "gen_done": "Done in {sec:.0f} s, peak memory {mem}: {file}",
+        "gen_failed": "Generation failed (exit code {code}). Last log line: {line}\nFull log: {log}",
+        "gen_no_output": "The engine finished but wrote no file. See the log: {log}",
+        "gen_stopped": "Stopped.",
+        "gen_open": "Open the result?",
+        "speech_voice": "Voice reference: {file}",
+        "speech_no_voice": "Tip: put a 5–15 second voice recording (wav or mp3) into {dir} and speech will sound like it.",
+        "server_stop_for_media": "Stopping the code model server to free memory.",
+        "menu.back_to": "Back to: {what}",
+        "menu.tests": "Test cases (results go to test-results/)",
+        "tests_none": "No test cases found in {dir}.",
+        "tests_kind": "Which test cases?",
+        "tests_kind_opt": "{kind}: {cases} cases, downloaded models: {models}",
+        "tests_no_models": "No {kind} model is downloaded yet. Download one first: “Download a new configuration”.",
+        "tests_case": "Which test case?",
+        "tests_all_cases": "All cases ({n})",
+        "tests_model": "Which model?",
+        "tests_all_models": "All downloaded ({n}), one after another",
+        "tests_plan": "{n} runs. A code case can take 5–30 minutes, a video several minutes.",
+        "tests_auto_warn": "In code cases OpenCode approves its own actions (edits files, runs commands) inside {dir}.",
+        "tests_run": "[{i}/{n}] {case} · {model}",
+        "tests_status": "{status} in {sec:.0f} s · peak memory {mem}",
+        "tests_tokens": "Tokens: {inp} in, {out} out, {reason} thinking · {tools} tool calls",
+        "tests_speed": "Prompt reading {pre:.0f} tok/s · generation {gen:.1f} tok/s",
+        "tests_media": "{units} · {per:.1f} s per {unit}",
+        "tests_check": "Check: {result}",
+        "tests_saved": "Summary: {file}",
+        "tests_open": "Open the results folder?",
+        "unit.image": "image", "unit.video": "frame", "unit.speech": "second of audio",
+        "status.ok": "Done", "status.fail": "Failed", "status.timeout": "Timed out",
+        "check.pass": "passed", "check.fail": "failed",
         "demo_title": "Practice page",
         "demo_heading": "Hello!",
         "demo_text": "Ask the assistant: “change the heading and add a dark theme toggle”.",
@@ -315,7 +522,7 @@ STRINGS = {
         "system_check": "Проверка компьютера",
         "system": "Система", "memory": "Память", "disk_free": "Свободно на диске",
         "unknown": "не удалось определить",
-        "pick_model": "Какую модель взять помощнику?",
+        "pick_model": "Какую модель взять?",
         "model.qwen3.5-4b": "Qwen3.5 4B: быстрая, хватит 8 ГБ",
         "model.qwen3.5-9b": "Qwen3.5 9B: сбалансированная, 16 ГБ",
         "model.qwen3.8-27b": "Qwen3.8 27B: новейшая и самая умная, медленнее, 32 ГБ",
@@ -405,7 +612,7 @@ STRINGS = {
         "menu.keep_exit": "Выйти, сервер оставить работать",
         "menu.opencode": "Вернуться в OpenCode",
         "menu.chat": "Открыть веб-чат в браузере",
-        "menu.switch": "Сменить модель или движок",
+        "menu.switch": "Другая конфигурация: скачать или переключить",
         "menu.models": "Модели на диске",
         "menu.status": "Состояние и журнал",
         "menu.uninstall": "Удалить всё, что скачано",
@@ -424,6 +631,68 @@ STRINGS = {
         "uninstall_warn": "Будет удалена папка {root} целиком: движки, модели, OpenCode, рабочая папка и замеры.",
         "uninstall_confirm": "Удалить всё?",
         "uninstall_done": "Готово. В системе ничего больше не осталось.",
+        "model.sd-turbo": "SD-Turbo: самая быстрая, 512 px, хватит 8 ГБ",
+        "model.flux-schnell": "Flux.1 schnell: детальные картинки 1024 px, 16 ГБ",
+        "model.z-image-turbo": "Z-Image Turbo: лучшее качество, читаемый текст на картинках, 24 ГБ",
+        "model.wan2.1-1.3b": "Wan 2.1 1.3B: ролики по 2 секунды, 832×480, 16 ГБ",
+        "model.wan2.2-5b": "Wan 2.2 5B: движение плавнее, 32 ГБ",
+        "model.qwen3-tts-1.7b": "Qwen3-TTS 1.7B: речь на 10 языках, включая русский, 8 ГБ",
+        "model.qwen3-tts-1.7b-q8": "Qwen3-TTS 1.7B, 8 бит: голос чище, 16 ГБ",
+        "kind.code": "Код", "kind.image": "Картинки", "kind.video": "Видео", "kind.speech": "Речь",
+        "pick_kind": "Что будем делать?",
+        "pick_kind.code": "Писать код с помощником (OpenCode)",
+        "pick_kind.image": "Генерировать картинки по описанию",
+        "pick_kind.video": "Генерировать короткие видео по описанию",
+        "pick_kind.speech": "Озвучивать текст",
+        "start_title": "Что запускаем?",
+        "start.run": "Запустить: {what}",
+        "start.new": "Скачать новую конфигурацию",
+        "start.tests": "Тест-кейсы: сравнить скачанные модели",
+        "start.menu": "Меню управления",
+        "start.exit": "Выйти",
+        "plan_sd": "Движок stable-diffusion.cpp {build}",
+        "no_sd_binary": "В архиве нет sd-cli — возможно, сборка изменила состав.",
+        "no_tts_binary": "В архиве llama.cpp нет llama-tts — возможно, сборка изменила состав.",
+        "media_unsupported": "Картинки и видео на {plat} пока недоступны.",
+        "gen_intro": "{what}. Введите текст и нажмите Enter; пустая строка — назад.",
+        "gen_prompt.image": "Опишите картинку (лучше по-английски)",
+        "gen_prompt.video": "Опишите сцену и движение (лучше по-английски)",
+        "gen_prompt.speech": "Текст для озвучки",
+        "gen_example.image": "Например: a red fox in a snowy forest at sunrise, photo",
+        "gen_example.video": "Например: a cat walks along a sunny windowsill, slow camera pan",
+        "gen_example.speech": "Например: Привет! Этот голос сделан прямо на вашем компьютере.",
+        "gen_running": "Генерирую. Модель загружается не сразу, видео займёт несколько минут…",
+        "gen_done": "Готово за {sec:.0f} с, пик памяти {mem}: {file}",
+        "gen_failed": "Генерация не удалась (код {code}). Последняя строка журнала: {line}\nПолный журнал: {log}",
+        "gen_no_output": "Движок завершился, но файл не записал. Смотрите журнал: {log}",
+        "gen_stopped": "Остановлено.",
+        "gen_open": "Открыть результат?",
+        "speech_voice": "Образец голоса: {file}",
+        "speech_no_voice": "Совет: положите в {dir} запись голоса на 5–15 секунд (wav или mp3), и озвучка будет звучать похоже.",
+        "server_stop_for_media": "Останавливаю сервер модели для кода, чтобы освободить память.",
+        "menu.back_to": "Вернуться: {what}",
+        "menu.tests": "Тест-кейсы (результаты — в test-results/)",
+        "tests_none": "В {dir} нет тест-кейсов.",
+        "tests_kind": "Какие тест-кейсы?",
+        "tests_kind_opt": "{kind}: кейсов — {cases}, скачано моделей — {models}",
+        "tests_no_models": "Ни одной модели для раздела «{kind}» ещё не скачано. Сначала скачайте: «Скачать новую конфигурацию».",
+        "tests_case": "Какой тест-кейс?",
+        "tests_all_cases": "Все кейсы ({n})",
+        "tests_model": "На какой модели?",
+        "tests_all_models": "На всех скачанных ({n}) по очереди",
+        "tests_plan": "Прогонов: {n}. Кейс с кодом может идти 5–30 минут, видео — несколько минут.",
+        "tests_auto_warn": "В кейсах с кодом OpenCode сам одобряет свои действия (правит файлы, запускает команды) внутри {dir}.",
+        "tests_run": "[{i}/{n}] {case} · {model}",
+        "tests_status": "{status} за {sec:.0f} с · пик памяти {mem}",
+        "tests_tokens": "Токены: {inp} на входе, {out} на выходе, {reason} на размышления · вызовов инструментов: {tools}",
+        "tests_speed": "Чтение запроса {pre:.0f} ток/с · генерация {gen:.1f} ток/с",
+        "tests_media": "{units} · {per:.1f} с на {unit}",
+        "tests_check": "Проверка: {result}",
+        "tests_saved": "Сводка: {file}",
+        "tests_open": "Открыть папку с результатами?",
+        "unit.image": "картинку", "unit.video": "кадр", "unit.speech": "секунду звука",
+        "status.ok": "Готово", "status.fail": "Не удалось", "status.timeout": "Не уложилось во время",
+        "check.pass": "пройдена", "check.fail": "не пройдена",
         "demo_title": "Учебная страница",
         "demo_heading": "Привет!",
         "demo_text": "Попросите помощника: «измени заголовок и добавь переключатель тёмной темы».",
@@ -477,6 +746,10 @@ class Cancelled(Exception):
 
 class NetworkError(RuntimeError):
     pass
+
+
+class Quit(Exception):
+    """The user chose Exit in the start menu."""
 
 
 def _enable_ansi() -> bool:
@@ -741,6 +1014,11 @@ def pid_alive(pid: int | None) -> bool:
 
 def open_folder(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+    open_path(path)
+
+
+def open_path(path: Path) -> None:
+    """Opens a folder or a file with the system's default app."""
     system = platform.system()
     if system == "Darwin":
         subprocess.run(["open", str(path)])
@@ -981,14 +1259,46 @@ def mlx_installed() -> bool:
     return marker.exists() and marker.read_text().strip() == MLX_LM_VERSION and mlx_python().exists()
 
 
+def sd_binary() -> Path | None:
+    path = SD_DIR / exe("sd-cli")
+    return path if path.exists() else None
+
+
+def tts_binary() -> Path | None:
+    path = LLAMA_DIR / exe("llama-tts")
+    return path if path.exists() else None
+
+
+def media_supported() -> bool:
+    """stable-diffusion.cpp publishes builds for macOS, x64 Linux and x64 Windows only."""
+    try:
+        return llama_platform() in SD_ASSETS
+    except RuntimeError:
+        return False
+
+
 def engine_installed(engine: str) -> bool:
-    return mlx_installed() if engine == "mlx" else server_binary() is not None
+    if engine == "mlx":
+        return mlx_installed()
+    if engine == "sd":
+        return sd_binary() is not None
+    if engine == "tts":
+        return tts_binary() is not None
+    return server_binary() is not None
 
 
 def llama_asset() -> tuple[str, str]:
     plat = llama_platform()
     ext = "zip" if plat.startswith("win") else "tar.gz"
     return LLAMA_URL.format(build=LLAMA_BUILD, plat=plat, ext=ext), plat
+
+
+def sd_asset() -> tuple[str, str]:
+    plat = llama_platform()
+    if plat not in SD_ASSETS:
+        raise RuntimeError(t("media_unsupported", plat=f"{platform.system()} {platform.machine()}"))
+    name, sha256 = SD_ASSETS[plat]
+    return SD_URL.format(build=SD_BUILD, name=name), sha256
 
 
 def opencode_asset() -> tuple[str, str]:
@@ -1019,6 +1329,19 @@ def install_llama() -> None:
             make_executable(path)
     if not server_binary():
         raise RuntimeError(t("no_server_binary"))
+
+
+def install_sd() -> None:
+    url, sha256 = sd_asset()
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"download {url} → {SD_DIR}"))
+        return
+    _install_archive(url, sha256, SD_DIR, f"stable-diffusion.cpp {SD_BUILD}")
+    for path in SD_DIR.iterdir():
+        if path.is_file() and path.name.startswith("sd-"):
+            make_executable(path)
+    if not sd_binary():
+        raise RuntimeError(t("no_sd_binary"))
 
 
 def uv_env() -> dict:
@@ -1072,6 +1395,11 @@ def install_model(profile: Profile) -> None:
     if DRY_RUN:
         say(t("dry_run_would", what=f"download {profile.url} → {profile.path}"))
         return
+    if profile.components:
+        missing = profile.missing
+        for index, item in enumerate(missing, 1):
+            download(item.url, item.path, item.sha256, t("file_n", name=item.path.name, i=index, n=len(missing)))
+        return
     if profile.engine == "gguf":
         download(profile.url, profile.path, profile.sha256, profile.file)
         return
@@ -1106,9 +1434,9 @@ def is_healthy(port: int) -> bool:
         return False
 
 
-def log_tail() -> str:
+def log_tail(path: Path = LOG_FILE) -> str:
     try:
-        lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
         return lines[-1][:110] if lines else ""
     except OSError:
         return ""
@@ -1135,7 +1463,7 @@ def server_command(profile: Profile, port: int, ctx: int) -> list[str]:
                 "--host", "127.0.0.1", "--port", str(port), "--max-tokens", "8192"]
     binary = server_binary() or LLAMA_DIR / exe("llama-server")
     return [str(binary), "-m", str(profile.path), "--alias", profile.key, "-c", str(ctx),
-            "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--jinja",
+            "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--jinja", "--metrics",
             "--host", "127.0.0.1", "--port", str(port)]
 
 
@@ -1376,6 +1704,484 @@ def launch_opencode(profile: Profile, state: dict) -> None:
         signal.signal(signal.SIGINT, previous)
 
 
+# ───────────────────────────── measuring ─────────────────────────────
+
+def rss_mb(pid: int) -> float:
+    """Resident memory of one process in MB; 0 when it cannot be read."""
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            field = out.strip().split('","')[-1]
+            return int("".join(ch for ch in field if ch.isdigit()) or 0) / 1024
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+        return int(out.strip() or 0) / 1024
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+class PeakMemory:
+    """Polls a process's resident memory in a background thread and keeps the maximum."""
+
+    def __init__(self, pid: int | None):
+        self.pid, self.peak = pid, 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+
+    def _poll(self) -> None:
+        interval = 1.0 if platform.system() == "Windows" else 0.5
+        while self.pid and not self._stop.is_set():
+            self.peak = max(self.peak, rss_mb(self.pid))
+            self._stop.wait(interval)
+
+    def __enter__(self) -> "PeakMemory":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+
+def mem_text(mb: float) -> str:
+    return size_text(mb / 1024) if mb else t("unknown")
+
+
+def _terminate(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def run_measured(command: list[str], cwd: Path, stdout, stderr, watch_pid: int | None = None,
+                 timeout: int | None = None, env: dict | None = None) -> dict:
+    """Runs a command to the end; returns exit code, wall time and the peak memory of watch_pid (or the command)."""
+    started = time.time()
+    process = subprocess.Popen(command, cwd=str(cwd), stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL,
+                               env=env)
+    timed_out = False
+    with PeakMemory(watch_pid or process.pid) as memory:
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate(process)
+            code, timed_out = -1, True
+        except KeyboardInterrupt:
+            _terminate(process)
+            raise
+    return {"exit": code, "timed_out": timed_out, "wall_s": time.time() - started, "peak_mem_mb": memory.peak}
+
+
+# ───────────────────────────── images, video, speech ─────────────────────────────
+
+def has_cyrillic(text: str) -> bool:
+    return any("Ѐ" <= ch <= "ӿ" for ch in text)
+
+
+def speaker_file() -> Path | None:
+    if VOICES_DIR.is_dir():
+        for path in sorted(VOICES_DIR.iterdir()):
+            if path.suffix.lower() in (".wav", ".mp3"):
+                return path
+    return None
+
+
+def _override(args: list[str], flag: str, value: str) -> None:
+    if flag in args:
+        args[args.index(flag) + 1] = value
+    else:
+        args += [flag, value]
+
+
+def media_command(profile: Profile, prompt: str, output: Path, overrides: dict | None = None,
+                  seed: str = "-1", lang: str | None = None) -> list[str]:
+    files = [part for c in profile.components for part in (c.flag, str(c.path))]
+    if profile.engine == "tts":
+        command = [str(tts_binary() or LLAMA_DIR / exe("llama-tts"))] + files
+        command += ["-p", prompt, "--tts-lang", lang or ("ru" if has_cyrillic(prompt) else "en"),
+                    "--output", str(output)]
+        speaker = speaker_file()
+        if speaker:
+            command += ["--tts-speaker-file", str(speaker)]
+        return command
+    args = list(profile.args)
+    for flag, value in (overrides or {}).items():
+        _override(args, flag, value)
+    if platform.system() == "Darwin":
+        args += list(profile.mac_args)
+    return [str(sd_binary() or SD_DIR / exe("sd-cli"))] + files + args + ["-p", prompt, "-o", str(output),
+                                                                          "--seed", seed]
+
+
+def wav_seconds(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as audio:
+            return audio.getnframes() / float(audio.getframerate() or 1)
+    except (OSError, wave.Error, EOFError):
+        return 0.0
+
+
+def generate(profile: Profile, prompt: str, output: Path, overrides: dict | None = None,
+             seed: str = "-1", lang: str | None = None) -> dict:
+    """One image, video or speech file. Returns time, peak memory and units (images, frames, audio seconds)."""
+    command = media_command(profile, prompt, output, overrides, seed, lang)
+    if DRY_RUN:
+        say(t("dry_run_would", what="run " + " ".join(shlex.quote(part) for part in command)))
+        return {"exit": 0, "timed_out": False, "wall_s": 0.0, "peak_mem_mb": 0.0, "units": 0, "s_per_unit": 0.0}
+    if running_state():
+        say(dim(t("server_stop_for_media")))
+        stop_server()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)
+    workdir = LLAMA_DIR if profile.engine == "tts" else SD_DIR
+    env = dict(os.environ)
+    if platform.system() == "Linux":
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [str(workdir), env.get("LD_LIBRARY_PATH")]))
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with GEN_LOG.open("ab") as log:
+        log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(command)}\n".encode())
+        log.flush()
+        result = run_measured(command, workdir, log, subprocess.STDOUT, env=env)
+    if result["exit"] != 0:
+        raise RuntimeError(t("gen_failed", code=result["exit"], line=log_tail(GEN_LOG), log=GEN_LOG))
+    if not output.exists():
+        raise RuntimeError(t("gen_no_output", log=GEN_LOG))
+    if profile.kind == "speech":
+        units = wav_seconds(output)
+    elif profile.kind == "video":
+        args = list(profile.args)
+        for flag, value in (overrides or {}).items():
+            _override(args, flag, value)
+        units = int(args[args.index("--video-frames") + 1])
+    else:
+        units = 1
+    result.update(units=round(units, 2), s_per_unit=result["wall_s"] / units if units else 0.0)
+    return result
+
+
+def ask_text(question: str) -> str:
+    say("\n" + bold(question))
+    try:
+        return input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def media_session(profile: Profile) -> None:
+    """Prompt → file loop for images, video and speech. An empty line goes back."""
+    profile = ensure_installed(profile)
+    kind = profile.kind
+    say("\n" + bold(t("gen_intro", what=profile_title(profile))))
+    say(dim(t("gen_example." + kind)))
+    if kind == "speech":
+        speaker = speaker_file()
+        say(dim(t("speech_voice", file=speaker) if speaker else t("speech_no_voice", dir=VOICES_DIR)))
+    while True:
+        text = ask_text(t("gen_prompt." + kind))
+        if not text:
+            return
+        output = OUTPUTS_DIR / kind / f"{time.strftime('%Y%m%d-%H%M%S')}.{profile.ext}"
+        say(dim(t("gen_running")))
+        try:
+            result = generate(profile, text, output)
+        except KeyboardInterrupt:
+            say("\n" + t("gen_stopped"))
+            continue
+        except RuntimeError as error:
+            say(fail(str(error)))
+            continue
+        say(ok(t("gen_done", sec=result["wall_s"], mem=mem_text(result["peak_mem_mb"]), file=output)))
+        if not DRY_RUN and yes_no(t("gen_open"), True):
+            open_path(output)
+
+
+# ───────────────────────────── test cases ─────────────────────────────
+
+RESULT_FIELDS = ["date", "run", "case", "kind", "model", "engine", "quant", "chip", "ram_gb", "status", "check",
+                 "wall_s", "peak_mem_gb", "input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens",
+                 "tool_calls", "prefill_tok_s", "gen_tok_s", "units", "s_per_unit", "output", "notes"]
+
+
+def load_cases() -> list[dict]:
+    """test-cases/<kind>/<id>.md: 'key: value' lines, a '---' line, then the prompt."""
+    cases = []
+    for path in sorted(TEST_CASES_DIR.glob("*/*.md")):
+        head, sep, body = path.read_text(encoding="utf-8").replace("\r\n", "\n").partition("\n---\n")
+        if not sep:
+            continue
+        meta: dict = {}
+        for line in head.splitlines():
+            key, colon, value = line.partition(":")
+            if colon and key.strip():
+                meta[key.strip().lower()] = value.strip()
+        if meta.get("kind") in KINDS:
+            prompt = body.strip() if meta["kind"] == "code" else " ".join(body.split())  # media: one line
+            meta.update(id=path.stem, path=path, prompt=prompt)
+            meta.setdefault("title", path.stem)
+            cases.append(meta)
+    return cases
+
+
+def llama_metrics(port: int) -> dict:
+    """Counters of llama-server's /metrics (needs --metrics); empty when unavailable."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+            text = response.read().decode(errors="ignore")
+    except (urllib.error.URLError, OSError):
+        return {}
+    numbers = {}
+    for line in text.splitlines():
+        if line.startswith("llamacpp:"):
+            name, _, value = line.partition(" ")
+            try:
+                numbers[name[len("llamacpp:"):]] = float(value)
+            except ValueError:
+                pass
+    return numbers
+
+
+def parse_events(path: Path) -> dict:
+    """Sums token usage over the step_finish events of `opencode run --format json`."""
+    usage = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "cached_tokens": 0, "tool_calls": 0,
+             "answer": "", "errors": []}
+    if not path.exists():
+        return usage
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        kind, part = event.get("type"), event.get("part") or {}
+        if kind == "step_finish":
+            tokens = part.get("tokens") or {}
+            usage["input_tokens"] += int(tokens.get("input") or 0)
+            usage["output_tokens"] += int(tokens.get("output") or 0)
+            usage["reasoning_tokens"] += int(tokens.get("reasoning") or 0)
+            usage["cached_tokens"] += int((tokens.get("cache") or {}).get("read") or 0)
+        elif kind == "tool_use":
+            usage["tool_calls"] += 1
+        elif kind == "text" and part.get("text"):
+            usage["answer"] += part["text"].strip() + "\n\n"
+        elif kind == "error":
+            usage["errors"].append(json.dumps(event.get("error"), ensure_ascii=False)[:300])
+    return usage
+
+
+def run_check(case: dict, work: Path, log: Path) -> str:
+    """'pass' when the expected files exist, contain the expected words and the check command succeeds."""
+    if not any(case.get(k) for k in ("expect", "contains", "check")):
+        return ""
+    passed, notes = True, []
+    for name in filter(None, (x.strip() for x in case.get("expect", "").split(","))):
+        if not (work / name).is_file() or not (work / name).stat().st_size:
+            passed = False
+            notes.append(f"missing {name}")
+    if case.get("contains"):
+        name, _, words = case["contains"].partition(":")
+        target = work / name.strip()
+        text = target.read_text(encoding="utf-8", errors="replace").lower() if target.is_file() else ""
+        for word in filter(None, (w.strip() for w in words.split(","))):
+            if word.lower() not in text:
+                passed = False
+                notes.append(f"{name.strip()} lacks '{word}'")
+    if case.get("check"):
+        case_dir = str(case["path"].parent)
+        command = [part.replace("{case_dir}", case_dir)
+                   for part in shlex.split(case["check"], posix=platform.system() != "Windows")]
+        if command and command[0] in ("python3", "python"):
+            command[0] = sys.executable
+        try:
+            result = subprocess.run(command, cwd=str(work), capture_output=True, text=True, timeout=300)
+            notes.append(f"$ {case['check']} -> exit {result.returncode}\n{result.stdout[-4000:]}{result.stderr[-4000:]}")
+            passed = passed and result.returncode == 0
+        except (OSError, subprocess.SubprocessError) as error:
+            passed = False
+            notes.append(f"$ {case['check']} -> {error}")
+    log.write_text("\n".join(notes) + "\n", encoding="utf-8")
+    return "pass" if passed else "fail"
+
+
+def _media_overrides(case: dict) -> dict:
+    overrides = {}
+    if "x" in case.get("size", ""):
+        width, height = case["size"].lower().split("x", 1)
+        overrides.update({"-W": width.strip(), "-H": height.strip()})
+    if case.get("steps"):
+        overrides["--steps"] = case["steps"]
+    if case.get("frames"):
+        overrides["--video-frames"] = case["frames"]
+    return overrides
+
+
+def run_case(case: dict, profile: Profile, run_dir: Path, run_id: str) -> dict:
+    """One case on one model. Everything lands in run_dir; the model works in run_dir/work."""
+    work = run_dir / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    if case.get("fixtures"):
+        source = case["path"].parent / case["fixtures"]
+        if source.is_dir():
+            shutil.copytree(source, work, dirs_exist_ok=True)
+    row = {key: "" for key in RESULT_FIELDS}
+    row.update(date=time.strftime("%Y-%m-%d %H:%M"), run=run_id, case=case["id"], kind=case["kind"],
+               model=profile.key, engine=ENGINE_NAMES[profile.engine], quant=profile.quant, chip=chip_name(),
+               ram_gb=f"{ram_gb() or 0:.0f}")
+    extra: dict = {}
+    try:
+        if case["kind"] == "code":
+            result = _run_code_case(case, profile, work, run_dir, row, extra)
+        else:
+            output = work / f"output.{profile.ext}"
+            result = generate(profile, case["prompt"], output, _media_overrides(case), case.get("seed", "42"),
+                              case.get("lang"))
+            row.update(units=result["units"], s_per_unit=f"{result['s_per_unit']:.2f}",
+                       output=str(output.relative_to(ROOT)))
+        row["status"] = "timeout" if result["timed_out"] else ("ok" if result["exit"] == 0 else "fail")
+        row.update(wall_s=f"{result['wall_s']:.1f}", peak_mem_gb=f"{result['peak_mem_mb'] / 1024:.2f}")
+    except RuntimeError as error:
+        row.update(status="fail", notes=str(error).splitlines()[0][:200])
+    if not DRY_RUN:
+        row["check"] = run_check(case, work, run_dir / "check.log")
+    (run_dir / "metrics.json").write_text(json.dumps(dict(row, **extra), ensure_ascii=False, indent=2) + "\n",
+                                          encoding="utf-8")
+    append_result(row)
+    return row
+
+
+def _run_code_case(case: dict, profile: Profile, work: Path, run_dir: Path, row: dict, extra: dict) -> dict:
+    state = bring_up(profile)
+    write_opencode_config(profile, state["port"], state.get("ctx", context_size()))
+    binary = opencode_binary() or OPENCODE_DIR / exe("opencode")
+    command = [str(binary), "run", "--format", "json", "--auto", "--model",
+               f"local-ai-starter/{api_model(profile)}", "--dir", str(work), case["prompt"]]
+    extra["command"] = command[:-1] + ["<prompt>"]
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"run {' '.join(command[:-1])} \"<{case['id']} prompt>\" in {work}"))
+        return {"exit": 0, "timed_out": False, "wall_s": 0.0, "peak_mem_mb": 0.0}
+    before = llama_metrics(state["port"]) if profile.engine == "gguf" else {}
+    with (run_dir / "events.jsonl").open("wb") as out, (run_dir / "opencode.log").open("wb") as err:
+        result = run_measured(command, work, out, err, watch_pid=state.get("pid"),
+                              timeout=int(case.get("timeout") or 1800), env=opencode_env())
+    usage = parse_events(run_dir / "events.jsonl")
+    (run_dir / "answer.md").write_text(usage.pop("answer"), encoding="utf-8")
+    extra["errors"] = usage.pop("errors")
+    if extra["errors"] and result["exit"] == 0:
+        result["exit"] = 1
+    row.update(usage)
+    after = llama_metrics(state["port"]) if before else {}
+    if before and after:
+        def rate(tokens: str, seconds: str) -> str:
+            spent = after.get(seconds, 0) - before.get(seconds, 0)
+            return f"{(after.get(tokens, 0) - before.get(tokens, 0)) / spent:.1f}" if spent > 0 else ""
+        row.update(prefill_tok_s=rate("prompt_tokens_total", "prompt_seconds_total"),
+                   gen_tok_s=rate("tokens_predicted_total", "tokens_predicted_seconds_total"))
+    elif result["wall_s"]:
+        row["gen_tok_s"] = f"{(row['output_tokens'] + row['reasoning_tokens']) / result['wall_s']:.1f}"
+        extra["gen_tok_s_note"] = "output tokens / wall time (includes tool runs and prompt reading)"
+    return result
+
+
+def append_result(row: dict) -> None:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    table = RESULTS_DIR / "results.csv"
+    new = not table.exists()
+    with table.open("a", encoding="utf-8", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=RESULT_FIELDS, extrasaction="ignore")
+        if new:
+            writer.writeheader()
+        writer.writerow(row)
+    write_summary()
+
+
+def write_summary() -> None:
+    """results.md: per case, the latest run of every model side by side."""
+    table = RESULTS_DIR / "results.csv"
+    with table.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    latest: dict = {}
+    for row in rows:
+        latest[(row["case"], row["model"])] = row
+    columns = {
+        "code": [("Model", "model"), ("Engine", "engine"), ("Status", "status"), ("Check", "check"),
+                 ("Time, s", "wall_s"), ("Peak memory, GB", "peak_mem_gb"), ("Tokens in", "input_tokens"),
+                 ("Tokens out", "output_tokens"), ("Thinking", "reasoning_tokens"), ("Tool calls", "tool_calls"),
+                 ("Prefill tok/s", "prefill_tok_s"), ("Generation tok/s", "gen_tok_s"), ("Date", "date")],
+        "media": [("Model", "model"), ("Status", "status"), ("Time, s", "wall_s"),
+                  ("Peak memory, GB", "peak_mem_gb"), ("Units", "units"), ("s per unit", "s_per_unit"),
+                  ("Output", "output"), ("Date", "date")],
+    }
+    lines = ["# Test results", "", "Latest run of every model per case. All runs: `results.csv`; details, "
+             "answers and logs: `../test-runs/<run>/<case>/<model>/`. Units: images, video frames or seconds "
+             "of audio.", ""]
+    for case in sorted({key[0] for key in latest}):
+        group = [row for (name, _), row in latest.items() if name == case]
+        cols = columns["code" if group[0]["kind"] == "code" else "media"]
+        lines += [f"## {case} ({group[0]['kind']})", "", "| " + " | ".join(c for c, _ in cols) + " |",
+                  "|" + "---|" * len(cols)]
+        for row in sorted(group, key=lambda r: r["model"]):
+            lines.append("| " + " | ".join(str(row.get(k) or "") for _, k in cols) + " |")
+        lines.append("")
+    (RESULTS_DIR / "results.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_test_cases() -> None:
+    cases = load_cases()
+    if not cases:
+        say(t("tests_none", dir=TEST_CASES_DIR))
+        return
+    ready = installed_profiles()
+    kinds = [k for k in KINDS if any(c["kind"] == k for c in cases)]
+    options = [t("tests_kind_opt", kind=t("kind." + k), cases=sum(c["kind"] == k for c in cases),
+                 models=sum(p.kind == k for p in ready)) for k in kinds]
+    kind = kinds[ask(t("tests_kind"), options, 1) - 1]
+    models = [p for p in ready if p.kind == kind]
+    if not models:
+        say(t("tests_no_models", kind=t("kind." + kind)))
+        return
+    group = [c for c in cases if c["kind"] == kind]
+    choice = ask(t("tests_case"), [t("tests_all_cases", n=len(group))] + [f"{c['title']} ({c['id']})" for c in group])
+    chosen = group if choice == 1 else [group[choice - 2]]
+    if len(models) > 1:
+        choice = ask(t("tests_model"), [t("tests_all_models", n=len(models))] + [profile_title(p) for p in models])
+        models = models if choice == 1 else [models[choice - 2]]
+    runs = [(p, c) for p in models for c in chosen]  # model outer: each model loads once
+    say("\n" + t("tests_plan", n=len(runs)))
+    if kind == "code":
+        say(dim(t("tests_auto_warn", dir=TEST_RUNS_DIR)))
+    if not yes_no(t("start"), True):
+        return
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        for index, (profile, case) in enumerate(runs, 1):
+            say("\n" + bold(t("tests_run", i=index, n=len(runs), case=case["title"], model=profile_title(profile))))
+            if not engine_installed(profile.engine) or (profile.kind == "code" and not opencode_binary()):
+                profile = ensure_installed(profile)
+            row = run_case(case, profile, TEST_RUNS_DIR / run_id / case["id"] / profile.key, run_id)
+            line = t("tests_status", status=t("status." + (row["status"] or "fail")), sec=float(row["wall_s"] or 0),
+                     mem=mem_text(float(row["peak_mem_gb"] or 0) * 1024))
+            say((ok if row["status"] == "ok" else fail)(line))
+            if row["notes"]:
+                say(dim("  " + row["notes"]))
+            if kind == "code" and not DRY_RUN:
+                say("  " + t("tests_tokens", inp=row["input_tokens"], out=row["output_tokens"],
+                             reason=row["reasoning_tokens"], tools=row["tool_calls"]))
+                if row["prefill_tok_s"]:
+                    say("  " + t("tests_speed", pre=float(row["prefill_tok_s"]), gen=float(row["gen_tok_s"] or 0)))
+            elif row["units"]:
+                say("  " + t("tests_media", units=row["units"], per=float(row["s_per_unit"] or 0),
+                             unit=t("unit." + kind)))
+            if row["check"]:
+                say("  " + t("tests_check", result=t("check." + row["check"])))
+    except KeyboardInterrupt:
+        say("\n" + t("gen_stopped"))
+    if (RESULTS_DIR / "results.md").exists():
+        say("\n" + ok(t("tests_saved", file=RESULTS_DIR / "results.md")))
+        if not DRY_RUN and yes_no(t("tests_open"), True):
+            open_folder(RESULTS_DIR)
+
+
 # ───────────────────────────── updates ─────────────────────────────
 
 def _version_tuple(text: str) -> tuple:
@@ -1522,6 +2328,34 @@ def show_system() -> float | None:
     return ram
 
 
+def profile_title(profile: Profile) -> str:
+    return f"{t('kind.' + profile.kind)} · {profile.name} · {ENGINE_NAMES[profile.engine]} · {profile.quant}"
+
+
+def available(profile: Profile) -> bool:
+    if profile.engine == "mlx":
+        return is_apple_silicon()
+    return profile.engine != "sd" or media_supported()
+
+
+def installed_profiles() -> list[Profile]:
+    """Downloaded configurations, the last used one first."""
+    ready = [p for p in _MODELS if available(p) and p.installed]
+    last = saved_profile()
+    return sorted(ready, key=lambda p: p is not last)
+
+
+def choose_kind() -> str:
+    kinds = [k for k in KINDS if k not in ("image", "video") or media_supported()]
+    options = []
+    for kind in kinds:
+        label = t("pick_kind." + kind)
+        if any(p.kind == kind and p.installed for p in _MODELS):
+            label += " ✓"
+        options.append(label)
+    return kinds[ask(t("pick_kind"), options, 1) - 1]
+
+
 def choose_engine() -> str:
     if not is_apple_silicon():
         return "gguf"
@@ -1535,10 +2369,12 @@ def choose_engine() -> str:
     return engines[ask(t("pick_engine"), options, 1) - 1]
 
 
-def choose_profile() -> Profile:
+def choose_profile(kind: str | None = None) -> Profile:
+    """A new configuration: what for (code, images, video, speech), the engine for code, then the model."""
     ram = show_system()
-    engine = choose_engine()
-    candidates = [p for p in PROFILES.values() if p.engine == engine]
+    kind = kind or choose_kind()
+    engine = choose_engine() if kind == "code" else None
+    candidates = [p for p in PROFILES.values() if p.kind == kind and available(p) and engine in (None, p.engine)]
     fitting = [p for p in candidates if p.min_ram_gb <= (ram or 16)]
     recommended = fitting[-1] if fitting else candidates[0]
     ordered = [recommended] + [p for p in candidates if p is not recommended]
@@ -1559,6 +2395,8 @@ def choose_profile() -> Profile:
 
 
 def engine_task(engine: str) -> tuple:
+    if engine == "sd":
+        return (t("plan_sd", build=SD_BUILD), SD_SIZE_MB / 1024, [sd_asset()[0]], install_sd)
     if engine == "mlx":
         return (t("plan_mlx", uv=UV_VERSION, py=MLX_PYTHON, ver=MLX_LM_VERSION), MLX_SIZE_MB / 1024,
                 [UV_URL, MLX_PYPI_URL], install_mlx)
@@ -1573,9 +2411,10 @@ def ensure_installed(profile: Profile | None) -> Profile:
     if not engine_installed(profile.engine) or DRY_RUN:
         tasks.append(engine_task(profile.engine))
     if not profile.installed or DRY_RUN:
-        tasks.append((t("plan_model", file=profile.label_path), profile.size / 2**30,
-                      [profile.url], lambda: install_model(profile)))
-    if not opencode_binary() or DRY_RUN:
+        size = sum(c.size for c in profile.missing) if profile.components else profile.size
+        urls = [c.url for c in profile.missing] or [profile.url]
+        tasks.append((t("plan_model", file=profile.label_path), size / 2**30, urls, lambda: install_model(profile)))
+    if profile.kind == "code" and (not opencode_binary() or DRY_RUN):
         tasks.append((t("plan_opencode", ver=OPENCODE_VERSION), OPENCODE_SIZE_MB / 1024,
                       [opencode_asset()[0]], install_opencode))
     if tasks:
@@ -1619,9 +2458,11 @@ def show_status() -> None:
     say(f"llama.cpp {LLAMA_BUILD}: {installed(server_binary())}")
     if is_apple_silicon():
         say(f"MLX (mlx-lm {MLX_LM_VERSION}): {installed(mlx_installed())}")
+    if media_supported():
+        say(f"stable-diffusion.cpp {SD_BUILD}: {installed(sd_binary())}")
     say(f"OpenCode {OPENCODE_VERSION}: {installed(opencode_binary())}")
     say(f"{t('status_server')}: {t('running_on', port=alive['port']) if alive else t('not_running')}")
-    say(f"{t('status_model')}: {f'{profile.key} → {profile.path}' if profile else '—'}")
+    say(f"{t('status_model')}: {f'{profile_title(profile)} → {profile.path}' if profile else '—'}")
     say(f"{t('status_log')}: {LOG_FILE}")
     if BENCH_FILE.exists():
         say(f"{t('status_bench')}: {BENCH_FILE}")
@@ -1644,6 +2485,10 @@ def model_entries() -> list[Path]:
     mlx = MODELS_DIR / "mlx"
     if mlx.is_dir():
         entries += sorted(p for p in mlx.glob("*/*") if p.is_dir())
+    for engine in ("sd", "tts"):  # media models: flat folders of shared files
+        folder = MODELS_DIR / engine
+        if folder.is_dir():
+            entries += sorted(p for p in folder.iterdir() if p.is_file())
     return entries
 
 
@@ -1701,24 +2546,62 @@ def run_opencode(profile: Profile | None) -> Profile:
     return profile
 
 
-def menu(profile: Profile | None) -> None:
-    actions = ["stop_exit", "keep_exit", "opencode", "switch", "bench", "chat", "models", "status", "uninstall"]
+def launch(profile: Profile | None) -> Profile:
+    """Code opens OpenCode; images, video and speech open a generation session."""
+    if profile is None:
+        profile = choose_profile()
+    if profile.kind == "code":
+        return run_opencode(profile)
+    media_session(profile)
+    return profile
+
+
+def start_menu() -> Profile | None:
+    """First screen: start any downloaded configuration, download a new one, or run test cases."""
     while True:
-        choice = actions[ask(t("menu_title"), [t("menu." + a) for a in actions], 1) - 1]
+        ready = installed_profiles()
+        if not ready:
+            return launch(None)
+        extra = ["new", "tests", "menu", "exit"]
+        options = [t("start.run", what=profile_title(p)) for p in ready] + [t("start." + e) for e in extra]
+        choice = ask(t("start_title"), options, 1)
+        if choice <= len(ready):
+            return launch(ready[choice - 1])
+        action = extra[choice - len(ready) - 1]
+        if action == "new":
+            return launch(None)
+        if action == "tests":
+            run_test_cases()
+        elif action == "menu":
+            return saved_profile()
+        elif action == "exit":
+            raise Quit()
+
+
+def menu(profile: Profile | None) -> None:
+    actions = ["stop_exit", "keep_exit", "opencode", "switch", "tests", "bench", "chat", "models", "status",
+               "uninstall"]
+    while True:
+        labels = [t("menu." + a) for a in actions]
+        if profile and profile.kind != "code":
+            labels[actions.index("opencode")] = t("menu.back_to", what=profile_title(profile))
+        choice = actions[ask(t("menu_title"), labels, 1) - 1]
         if choice == "stop_exit":
             stop_server()
             return
         if choice == "keep_exit":
             return
         if choice == "opencode":
-            profile = run_opencode(profile)
+            profile = launch(profile)
         elif choice == "switch":
-            profile = run_opencode(choose_profile())
+            profile = launch(choose_profile())
+        elif choice == "tests":
+            run_test_cases()
         elif choice == "bench":
-            speed_test(profile or choose_profile())
+            speed_test(profile if profile and profile.kind == "code" else choose_profile("code"))
             profile = saved_profile()
         elif choice == "chat":
-            profile = ensure_installed(profile)
+            profile = ensure_installed(profile if profile and profile.kind == "code" else choose_profile("code"))
             open_chat(profile)
         elif choice == "models":
             manage_models()
@@ -1735,8 +2618,10 @@ def main(argv: list[str]) -> int:
         migrate_layout()
         profile = saved_profile()
         if "--menu" not in argv:
-            profile = run_opencode(profile)
+            profile = start_menu()
         menu(profile)
+        return 0
+    except Quit:
         return 0
     except (Cancelled, KeyboardInterrupt):
         say("\n" + t("cancelled"))
