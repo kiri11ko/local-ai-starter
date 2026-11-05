@@ -1,6 +1,6 @@
 # Update models
 
-Линейка — `_MODELS` (`local_ai_starter.py:149`), см. [profiles](../entities/profiles.md).
+Линейка — `_MODELS` (`local_ai_starter.py:240`), см. [profiles](../entities/profiles.md).
 
 ## Найти кандидатов
 

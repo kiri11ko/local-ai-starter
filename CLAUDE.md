@@ -5,11 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A single-file, stdlib-only Python wizard (`local_ai_starter.py`): one double-click
-(`RunMe.command` / `RunMe.sh` / `RunMe.bat`) downloads an engine, a Qwen model and a pinned
-OpenCode CLI, starts a local OpenAI-compatible server on `127.0.0.1`, and opens OpenCode in
-the same terminal in `local-ai/workspace`. Two engines: llama.cpp + GGUF everywhere, and on
-Apple Silicon also MLX (`mlx_lm.server`). The user picks one so the two can be benchmarked
-side by side. Target users are non-technical: arrow-key menus,
+(`RunMe.command` / `RunMe.sh` / `RunMe.bat`) sets up local AI of four kinds. Code: an engine,
+a Qwen model and a pinned OpenCode CLI, a local OpenAI-compatible server on `127.0.0.1`, OpenCode
+in the same terminal in `local-ai/workspace`; two engines, llama.cpp + GGUF everywhere and MLX
+(`mlx_lm.server`) on Apple Silicon. Images and video: stable-diffusion.cpp (`sd-cli`). Speech:
+`llama-tts` from the same llama.cpp build. `test-cases/` holds tasks the wizard runs on the
+downloaded models and measures itself, so models and engines can be compared. Target users are non-technical: arrow-key menus,
 Enter = recommended option. Code, comments and launchers are English. User-facing text lives
 only in `STRINGS` (`en` + `ru`, picked from the system locale). The wiki and commit messages are Russian.
 
@@ -33,15 +34,20 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
   That is how to script the dry run: `printf '\n\n1\n' | …`.
 - To test installs without the network, serve archives with `python3 -m http.server` and
   override `LLAMA_URL` / `OPENCODE_URL` from a `python3 -c 'import local_ai_starter as m; …'`.
+- Test-case plumbing without a model: fake `opencode_binary` (a script printing `step_finish` events)
+  and `bring_up` (a dict with the port of a fake `/metrics` server), then `run_case`. Verifiers in
+  `test-cases/code/verify/` must exit 0 on a reference solution and 1 on the original fixtures.
 - Real model runs download GB-sized weights: warn the user before starting one. The MLX runtime
   can be checked cheaply: `uv venv` + `uv pip install --dry-run mlx-lm==…` with `uv_env()`.
 
 ## Architecture
 
-- **Flow (`main` → `run_opencode` → `menu`)**: every run goes through `ensure_installed()`.
-  It asks for a profile only if none is saved, plans only the missing pieces, then runs
-  `check_network()`, downloads, `bring_up()` and `launch_opencode()`. After OpenCode exits,
-  the management menu opens. `--menu` skips straight to it.
+- **Flow (`main` → `start_menu` → `launch` → `menu`)**: the start menu lists every installed
+  profile (last used first) plus "download a new configuration", test cases, the management menu
+  and exit (`Quit`). `launch` sends code profiles to `run_opencode` and media profiles to
+  `media_session`. Both go through `ensure_installed()`: it plans only the missing pieces, then
+  runs `check_network()` and the downloads. A new configuration is `choose_profile()`: kind →
+  engine (code only) → model. `--menu` skips straight to the management menu.
 - **Updates (`check_for_update` → `apply_update` → `restart`)**: the first step of `main`.
   It reads GitHub Releases `latest` (5 s timeout; any failure is one dim line, never fatal) and
   offers only a strictly newer tag than `VERSION`. A git checkout gets `git merge --ff-only <tag>`
@@ -53,17 +59,32 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
   `Cancelled` means the user backed out. `main` prints all of them.
 - **Downloads (`download`)**: resumable `.part` + `Range`, 30 s stall timeout, 5 retries,
   SHA-256 (when known) checked before the rename. A pre-flight fetch of byte 0 (15 s) covers redirects and CDNs.
-- **Pins**: `LLAMA_BUILD`/`LLAMA_SHA256` and `OPENCODE_VERSION`/`OPENCODE_SHA256` (one hash
-  per platform key), `UV_VERSION`/`UV_SHA256` and `MLX_LM_VERSION`. Its Python dependencies are
+- **Pins**: `LLAMA_BUILD`/`LLAMA_SHA256`, `SD_BUILD`/`SD_ASSETS` and `OPENCODE_VERSION`/`OPENCODE_SHA256`
+  (one hash per platform key; sd.cpp has no Linux/Windows arm64 builds, so media is hidden there),
+  `UV_VERSION`/`UV_SHA256` and `MLX_LM_VERSION`. Its Python dependencies are
   resolved at install time and not hash-pinned. Model hashes come from Hugging Face LFS
   metadata (`/api/models/<repo>/tree/<rev>`).
-- **Profiles (`_MODELS`)**: one line-up mirrored for both engines (`_gguf` / `_mlx`, keys
-  `<base>` and `<base>-mlx`), ordered small → large. The recommendation is the largest
-  profile with `min_ram_gb` ≤ RAM. Labels come from `STRINGS["model.<base>"]`. GGUF pins a file +
-  SHA-256; MLX pins a repo commit (in `file`) and checks every LFS file against its hash at that commit.
+- **Profiles (`_MODELS`)**: `kind` is code / image / video / speech. Code: one line-up mirrored for
+  both engines (`_gguf` / `_mlx`, keys `<base>` and `<base>-mlx`). Media (`_media`): `components`
+  (`Component`: engine folder, CLI flag, repo, pinned commit, file, size, SHA-256), default `args`,
+  `mac_args`, output `ext`. Ordered small → large per kind; the recommendation is the largest with
+  `min_ram_gb` ≤ RAM. Labels come from `STRINGS["model.<base>"]`, the part before ":" is the short
+  name. GGUF pins a file + SHA-256; MLX pins a repo commit (in `file`) and checks every LFS file.
 - **Storage never overlaps**: `engines/llama.cpp/`, `engines/mlx/` (uv, uv-managed Python 3.12,
-  venv with pinned `mlx-lm`), `models/gguf/<family>/<file>.gguf`, `models/mlx/<family>/<repo>/`
-  (+ `.complete` marker). `migrate_layout()` moves the v2 layout (`bin/`, `models/<family>/`) in place.
+  venv with pinned `mlx-lm`), `engines/stable-diffusion.cpp/`, `models/gguf/<family>/<file>.gguf`,
+  `models/mlx/<family>/<repo>/` (+ `.complete` marker), and flat `models/sd/`, `models/tts/` where
+  files shared by several profiles (VAE, text encoders, TTS codec) are stored once.
+  `migrate_layout()` moves the v2 layout (`bin/`, `models/<family>/`) in place.
+- **Media (`generate`, `media_session`)**: one `sd-cli` / `llama-tts` run per file, measured by
+  `run_measured` (wall time, peak RSS via `ps`/`tasklist`). A running code server is stopped first.
+  Flux and Z-Image get `--backend vae=cpu` on macOS (Metal VAE gives a blank white image).
+  Outputs go to `local-ai/outputs/<kind>/`.
+- **Test cases (`run_test_cases`)**: `test-cases/<kind>/<id>.md` (header, `---`, prompt; format in
+  `test-cases/README.md`). Code runs `opencode run --format json --auto --dir work`; tokens are summed
+  from `step_finish` events, llama.cpp speeds come from `/metrics` deltas (server has `--metrics`).
+  Hidden checks in `test-cases/code/verify/` run in the work folder via `check: python3 {case_dir}/…`.
+  Each run writes `local-ai/test-runs/<run>/<case>/<model>/` and a row in `test-results/results.csv`;
+  `results.md` is rebuilt with the latest run per model.
 - **Server ids**: llama-server gets `--alias <key>`. `mlx_lm.server` loads any unknown
   `model` name as a new model, so OpenCode and requests use `default_model` for MLX
   (`api_model()`, stored as `model_id` in `state.json`). Context is 32K (16K below 12 GB RAM,
@@ -101,8 +122,10 @@ this file is the schema. Start from `docs/wiki/index.md`; current state is in `d
 
 - Structure: `index.md`, `log.md` (append-only), `status.md`, `architecture.md`,
   `debugging_log.md`, `entities/` (wizard-flow, terminal-ui, i18n, network, profiles,
-  llama-engine, mlx-engine, server-lifecycle, speed-test, opencode-integration, launchers, updater),
-  `workflows/` (build, test, release, update-llama-build, update-opencode, update-models).
+  llama-engine, mlx-engine, sd-engine, speech, test-cases, server-lifecycle, speed-test,
+  opencode-integration, launchers, updater),
+  `workflows/` (build, test, release, update-llama-build, update-sd-build, update-opencode, update-models),
+  `todo.md` (backlog).
 - Ingest: new info → its one canonical page → dated `log.md` entry → `status.md` if affected.
   Query: wiki first, code as fallback, file the answer back. Lint: contradictions, stale
   `file:line` refs, orphans, missing links. Full procedures are in the `/wiki` command.

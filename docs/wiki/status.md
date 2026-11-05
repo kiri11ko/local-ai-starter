@@ -1,6 +1,6 @@
 # Состояние
 
-На 2026-11-04.
+На 2026-11-05.
 
 ## What Works
 
@@ -24,6 +24,14 @@
 - Разбор потока в замере скорости — на поддельном сервере в обоих форматах ([speed-test](entities/speed-test.md)).
 - OpenCode v1.19.5: установка, конфиг принимается, данные изолированы в `local-ai/opencode-home`
   ([opencode-integration](entities/opencode-integration.md)).
+- Стартовое меню со всеми скачанными конфигурациями и выбор вида (код / картинки / видео / речь) —
+  dry-run на обоих языках, в том числе на подделанных «скачанных» файлах ([wizard-flow](entities/wizard-flow.md)).
+- Картинки и видео через stable-diffusion.cpp `master-1050-58bb3c1`, речь через `llama-tts` (Qwen3-TTS):
+  пины и SHA-256 всех файлов собраны с GitHub и Hugging Face, архив sd.cpp для macOS скачан и сверен,
+  команды движков собираются ([sd-engine](entities/sd-engine.md), [speech](entities/speech.md)).
+- Тест-кейсы (4 кода, 3 картинки, 2 видео, 3 речи): прогон, замер пиковой памяти и токенов,
+  скрытые проверки, `results.csv` и `results.md` — на поддельных OpenCode и `/metrics`
+  ([test-cases](entities/test-cases.md)).
 
 ## What's Broken / Not Verified
 
@@ -32,6 +40,9 @@
   память с контекстом 32K/64K. Пользователь сам сравнивает llama.cpp и MLX на 64-ГБ Mac и
   пришлёт отзыв.
 - Полная установка mlx-lm (~300 МБ) и запуск `mlx_lm.server` не проверялись.
+- Ни одной реальной генерации картинки, видео или речи и ни одного реального прогона тест-кейса:
+  загрузки от 1,4 до 12 ГБ. Не проверено, что `--backend vae=cpu` нужен и достаточен для Flux на этой
+  сборке, и что RSS на macOS отражает память Metal.
 - Linux и Windows на реальных машинах не проверялись (меню со стрелками, `msvcrt`, `SetConsoleMode`,
   `opencode.exe`).
 - Риски из кода — в Known Issues страниц [server-lifecycle](entities/server-lifecycle.md),
@@ -43,12 +54,13 @@
 
 ## Next Steps
 
+- Реальный прогон: SD-Turbo (4,9 ГБ), Qwen3-TTS Q4 (1,4 ГБ), тест-кейс `fix-failing-tests` на Qwen3.5 4B.
 - Отзыв пользователя по замерам llama.cpp против MLX: оставить оба, сделать MLX движком по
   умолчанию на Mac или убрать его ([speed-test](entities/speed-test.md)).
 - Прогон с моделью: правка `index.html` через OpenCode; при плохом tool calling сменить
   рекомендуемые модели ([profiles](entities/profiles.md)).
 - Linux и Windows.
-- GPU-сборки llama.cpp для Windows/Linux (сейчас CPU).
+- GPU-сборки llama.cpp и sd.cpp для Windows/Linux (сейчас CPU), см. [todo](todo.md).
 - Ещё семейства моделей (например, gemma): [update-models](workflows/update-models.md).
 
 ## Out of Scope

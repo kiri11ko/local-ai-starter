@@ -6,14 +6,15 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 Основной движок на всех системах: закреплённая сборка llama.cpp и модели GGUF.
 
 ## Key API
-- `LLAMA_BUILD`, `LLAMA_URL`, `LLAMA_SHA256` — `local_ai_starter.py:70-80`. Одна сборка для
+- `LLAMA_BUILD`, `LLAMA_URL`, `LLAMA_SHA256` — `local_ai_starter.py:84-94`. Одна сборка для
   всех, хеш для каждого из 6 ключей платформы.
-- `llama_platform()` — `local_ai_starter.py:692`: `macos-*`, `ubuntu-*`, `win-cpu-*` × `arm64|x64`.
-- `install_llama()` — `local_ai_starter.py:1011`, через `_install_archive` (`:1000`) в
+- `llama_platform()` — `local_ai_starter.py:965`: `macos-*`, `ubuntu-*`, `win-cpu-*` × `arm64|x64`.
+- `install_llama()` — `local_ai_starter.py:1321`, через `_install_archive` (`:1310`) в
   `engines/llama.cpp/`: загрузка с докачкой и SHA-256 ([network](network.md)), exec-бит файлам `llama*`.
-- GGUF-модели скачивает сам мастер (`install_model`, `local_ai_starter.py:1071`) в
+- GGUF-модели скачивает сам мастер (`install_model`, `local_ai_starter.py:1394`) в
   `models/gguf/<family>/`, а не `llama-server -hf`: у того своя нечитаемая раскладка кэша.
-- `server_binary()` — `local_ai_starter.py:965`.
+- `server_binary()` — `local_ai_starter.py:1243`. В том же архиве `llama-tts` — движок речи ([speech](speech.md)),
+  exec-бит он получает вместе с остальными `llama*`.
 
 ## Collaborators
 - [server-lifecycle](server-lifecycle.md) — запуск; [network](network.md) — загрузка и распаковка;

@@ -34,11 +34,23 @@ printf '\n\n1\n' | LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d
   лишним коммитом после него ([updater](../entities/updater.md)).
 - **Изоляция OpenCode**: `HOME=<пустая папка>`, `opencode models local-ai-starter` и
   `opencode debug config` с `opencode_env()` — в HOME ничего от OpenCode.
+- **Стартовое меню без загрузок**: во временном `LOCAL_AI_STARTER_HOME` создать пустые файлы моделей
+  (`models/gguf/qwen/<файл>.gguf`, все компоненты в `models/sd/`, `models/tts/`) и бинарники движков
+  (`engines/llama.cpp/llama-server`, `llama-tts`, `engines/stable-diffusion.cpp/sd-cli`, `opencode/opencode`),
+  в `state.json` — `profile`; затем dry-run: строки «Запустить: …», порядок, тест-кейсы всех видов.
+- **Прогонщик тест-кейсов без модели**: подменить `m.opencode_binary` скриптом, печатающим события
+  `step_finish`/`tool_use`/`text`, `m.bring_up` — словарём с портом поддельного `/metrics`
+  (`http.server`), и вызвать `run_case`; проверить токены, скорости, `check` pass/fail
+  ([test-cases](../entities/test-cases.md)).
+- **Верификаторы кейсов**: запустить `test-cases/code/verify/*.py` в папке с эталонным решением
+  (должен быть код 0) и с исходными fixtures (код 1).
+- **Пиковая память**: `run_measured` на `python3 -c "x=bytearray(300_000_000); ..."` — около 290 МБ.
 
 ## Ручной чеклист (из README)
 
 - macOS Apple Silicon, оба движка: чистый старт → OpenCode правит `index.html` → `/exit` → меню →
-  замер скорости → смена движка → повторный запуск → остановка → «Удалить всё».
+  замер скорости → смена движка → повторный запуск (в стартовом меню оба) → остановка → «Удалить всё».
+- Картинки, видео, речь: по одной генерации и по одному тест-кейсу каждого вида; картинка Flux не белая.
 - Прерванная загрузка модели (докачка), заблокированный хост (сообщение), занятый порт 8080
   ([server-lifecycle](../entities/server-lifecycle.md)), мало места на диске.
 - Linux и Windows на реальных машинах.

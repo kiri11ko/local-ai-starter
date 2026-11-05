@@ -1,7 +1,8 @@
 # Local AI Starter — Wiki
 
-Мастер, который одним двойным щелчком ставит движок (llama.cpp или MLX), модель Qwen и OpenCode и открывает
-OpenCode на локальной модели в терминале (macOS, Linux, Windows). Весь код — один файл
+Мастер, который одним двойным щелчком ставит локальный ИИ: для кода — движок (llama.cpp или MLX), модель Qwen
+и OpenCode в терминале; для картинок и видео — stable-diffusion.cpp; для речи — llama-tts. Тест-кейсы
+сравнивают скачанные модели на одних задачах (macOS, Linux, Windows). Весь код — один файл
 [`local_ai_starter.py`](../../local_ai_starter.py).
 
 ## Обзор
@@ -13,13 +14,16 @@ OpenCode на локальной модели в терминале (macOS, Linu
 
 ## Сущности
 
-- [wizard-flow](entities/wizard-flow.md) — `main`, `ensure_installed`, меню после OpenCode, модели на диске
+- [wizard-flow](entities/wizard-flow.md) — `main`, стартовое меню, выбор конфигурации, `ensure_installed`, меню управления
 - [terminal-ui](entities/terminal-ui.md) — меню со стрелками, ANSI, оформление вывода
 - [i18n](entities/i18n.md) — `STRINGS`, определение языка системы
 - [network](entities/network.md) — проверка доступности, докачка, SHA-256, распаковка
 - [profiles](entities/profiles.md) — линейка моделей для обоих движков, выбор по памяти
 - [llama-engine](entities/llama-engine.md) — закреплённая сборка llama.cpp, модели GGUF
 - [mlx-engine](entities/mlx-engine.md) — MLX на Apple Silicon: uv, Python, mlx-lm, модели MLX
+- [sd-engine](entities/sd-engine.md) — stable-diffusion.cpp: картинки и видео, сеанс генерации
+- [speech](entities/speech.md) — озвучка через llama-tts и Qwen3-TTS
+- [test-cases](entities/test-cases.md) — тест-кейсы, замеры, скрытые проверки, `results.csv`/`.md`
 - [speed-test](entities/speed-test.md) — замер скорости и `benchmarks.csv`
 - [server-lifecycle](entities/server-lifecycle.md) — запуск, контекст, готовность, остановка, `state.json`
 - [opencode-integration](entities/opencode-integration.md) — закреплённый OpenCode, конфиг, изоляция, workspace
@@ -34,10 +38,13 @@ OpenCode на локальной модели в терминале (macOS, Linu
 - [update-llama-build](workflows/update-llama-build.md) — как поднять версию llama.cpp
 - [update-opencode](workflows/update-opencode.md) — как поднять версию OpenCode
 - [update-models](workflows/update-models.md) — как обновить линейку моделей
+- [update-sd-build](workflows/update-sd-build.md) — как поднять версию stable-diffusion.cpp
+- [todo](todo.md) — бэклог проекта
 
 ## Внешние ссылки
 
 - Релизы llama.cpp: https://github.com/ggml-org/llama.cpp/releases
 - Релизы OpenCode: https://github.com/anomalyco/opencode/releases, документация https://opencode.ai/docs
 - Модели: `ggml-org/*-GGUF`, `unsloth/*-GGUF`, `mlx-community/*` на Hugging Face
+- Релизы stable-diffusion.cpp: https://github.com/leejet/stable-diffusion.cpp/releases, модели — его `docs/*.md`
 - mlx-lm: https://pypi.org/project/mlx-lm/, uv: https://github.com/astral-sh/uv/releases
