@@ -39,7 +39,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "2.1.0"  # must match the GitHub release tag (vX.Y.Z)
+VERSION = "2.2.0"  # must match the GitHub release tag (vX.Y.Z)
 
 DRY_RUN = os.environ.get("LOCAL_AI_STARTER_DRY_RUN") == "1"
 DEFAULT_PORT = 8080
