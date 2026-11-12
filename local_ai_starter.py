@@ -58,6 +58,8 @@ OPENCODE_DIR = ROOT / "opencode"
 OPENCODE_HOME = ROOT / "opencode-home"
 OPENCODE_CONFIG = ROOT / "opencode.json"
 WORKSPACE_DIR = ROOT / "workspace"
+COMMAND_NAME = "local-opencode"
+COMMAND_DIR = ROOT / "bin"              # the generated launcher script
 STATE_FILE = ROOT / "state.json"
 LOG_FILE = ROOT / "server.log"
 BENCH_FILE = ROOT / "benchmarks.csv"
@@ -461,6 +463,20 @@ STRINGS = {
         "start.tests": "Test cases: compare the downloaded models",
         "start.menu": "Management menu",
         "start.exit": "Exit",
+        "start.command": "Command for OpenCode in any folder",
+        "menu.command": "Command for OpenCode in any folder",
+        "command_intro": "A command \u201c{name}\u201d starts the server with the last used model and opens OpenCode in the folder where you run it.",
+        "command_script": "Launcher created: {path}",
+        "command_install": "Add the command to the system (recommended)",
+        "command_show": "Only show the path to the launcher",
+        "command_linked": "Done: {link}",
+        "command_conflict": "{link} already exists and is not ours, so it was left alone.",
+        "command_path_hint": "{dir} is not in PATH yet. Add this line to ~/.zshrc or ~/.bashrc and open a new terminal:\n  export PATH=\"$HOME/.local/bin:$PATH\"",
+        "command_usage": "Open a terminal in your project folder and type: {name}\nTo stop the server: {name} --stop",
+        "here_no_dir": "Folder not found: {dir}",
+        "here_server": "OpenCode is closed. What about the model server?",
+        "here_keep": "Keep it running (next start is instant)",
+        "here_stop": "Stop the server and free memory",
         "plan_sd": "stable-diffusion.cpp engine {build}",
         "no_sd_binary": "sd-cli is missing from the archive; the build layout may have changed.",
         "no_tts_binary": "llama-tts is missing from the llama.cpp archive; the build layout may have changed.",
@@ -650,6 +666,20 @@ STRINGS = {
         "start.tests": "Тест-кейсы: сравнить скачанные модели",
         "start.menu": "Меню управления",
         "start.exit": "Выйти",
+        "start.command": "Команда для OpenCode в любой папке",
+        "menu.command": "Команда для OpenCode в любой папке",
+        "command_intro": "Команда «{name}» поднимает сервер с последней моделью и открывает OpenCode в той папке, где её запустили.",
+        "command_script": "Скрипт создан: {path}",
+        "command_install": "Добавить команду в систему (рекомендую)",
+        "command_show": "Только показать путь к скрипту",
+        "command_linked": "Готово: {link}",
+        "command_conflict": "{link} уже существует и не наш, поэтому я его не тронул.",
+        "command_path_hint": "Папки {dir} пока нет в PATH. Добавьте строку в ~/.zshrc или ~/.bashrc и откройте новый терминал:\n  export PATH=\"$HOME/.local/bin:$PATH\"",
+        "command_usage": "Откройте терминал в папке проекта и введите: {name}\nОстановить сервер: {name} --stop",
+        "here_no_dir": "Папка не найдена: {dir}",
+        "here_server": "OpenCode закрыт. Что сделать с сервером модели?",
+        "here_keep": "Оставить работать (следующий запуск мгновенный)",
+        "here_stop": "Остановить сервер и освободить память",
         "plan_sd": "Движок stable-diffusion.cpp {build}",
         "no_sd_binary": "В архиве нет sd-cli — возможно, сборка изменила состав.",
         "no_tts_binary": "В архиве llama.cpp нет llama-tts — возможно, сборка изменила состав.",
@@ -1686,20 +1716,25 @@ def opencode_env() -> dict:
     return env
 
 
-def launch_opencode(profile: Profile, state: dict) -> None:
+def launch_opencode(profile: Profile, state: dict, workdir: Path | None = None) -> None:
+    """Opens OpenCode in the wizard's workspace, or in `workdir` (a folder of the user's own)."""
     write_opencode_config(profile, state["port"], state.get("ctx", context_size()))
-    prepare_workspace()
-    say("\n" + bold(t("opencode_intro", dir=WORKSPACE_DIR)))
+    if workdir is None:
+        prepare_workspace()  # never writes into a folder that is not ours
+    cwd = workdir or WORKSPACE_DIR
+    say("\n" + bold(t("opencode_intro", dir=cwd)))
     say(t("opencode_tips", example=t("opencode_example")))
     binary = opencode_binary()
     if DRY_RUN:
-        say(t("dry_run_would", what=f"run {OPENCODE_DIR / exe('opencode')} in {WORKSPACE_DIR}"))
+        say(t("dry_run_would", what=f"run {OPENCODE_DIR / exe('opencode')} in {cwd} --model local-ai-starter/{api_model(profile)}"))
         return
     if not binary:
         raise RuntimeError(t("opencode_missing"))
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C belongs to OpenCode now
     try:
-        subprocess.run([str(binary)], cwd=str(WORKSPACE_DIR), env=opencode_env())
+        # --model wins over a project opencode.json in the user's folder that names another model
+        subprocess.run([str(binary), "--model", f"local-ai-starter/{api_model(profile)}"],
+                       cwd=str(cwd), env=opencode_env())
     finally:
         signal.signal(signal.SIGINT, previous)
 
@@ -2534,9 +2569,107 @@ def uninstall() -> bool:
     if not yes_no(t("uninstall_confirm"), False):
         return False
     stop_server()
+    remove_command()
     shutil.rmtree(ROOT, ignore_errors=True)
     say(ok(t("uninstall_done")))
     return True
+
+
+def command_script_path() -> Path:
+    return COMMAND_DIR / (COMMAND_NAME + (".cmd" if platform.system() == "Windows" else ""))
+
+
+def command_link_path() -> Path:
+    """Where the command is exposed on PATH (only with the user's consent)."""
+    if platform.system() == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "Microsoft" / "WindowsApps" / (COMMAND_NAME + ".cmd")
+    return Path.home() / ".local" / "bin" / COMMAND_NAME
+
+
+def write_command_script() -> Path:
+    """Writes the launcher that runs this wizard in `--here` mode; absolute paths, so a copy works too."""
+    path = command_script_path()
+    script = str(Path(__file__).resolve())
+    if platform.system() == "Windows":
+        body = f'@echo off\r\n"{sys.executable}" "{script}" --here "%CD%" %*\r\n'
+    else:
+        body = f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(script)} --here \"$PWD\" \"$@\"\n"
+    COMMAND_DIR.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.read_text(encoding="utf-8") != body:
+        with open(path, "w", encoding="utf-8", newline="") as out:  # write_text(newline=) needs 3.10
+            out.write(body)
+    path.chmod(0o755)
+    return path
+
+
+def _is_our_link(link: Path) -> bool:
+    script = command_script_path()
+    try:
+        if platform.system() == "Windows":
+            return link.is_file() and link.read_text(encoding="utf-8") == script.read_text(encoding="utf-8")
+        return link.is_symlink() and Path(os.readlink(link)) == script
+    except OSError:
+        return False
+
+
+def install_command() -> None:
+    """Menu item: create the launcher and, if the user agrees, expose it on PATH."""
+    say("\n" + t("command_intro", name=COMMAND_NAME))
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"write {command_script_path()} and link {command_link_path()}"))
+        return
+    script = write_command_script()
+    say(ok(t("command_script", path=script)))
+    if ask(t("command_intro", name=COMMAND_NAME), [t("command_install"), t("command_show")], 1) != 1:
+        say(t("command_usage", name=script))
+        return
+    link = command_link_path()
+    if link.exists() or link.is_symlink():
+        if not _is_our_link(link):
+            if not (link.is_symlink() and not link.exists()):  # a dangling symlink is safe to replace
+                say(fail(t("command_conflict", link=link)))
+                return
+        link.unlink()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Windows":
+        shutil.copyfile(script, link)
+    else:
+        link.symlink_to(script)
+    say(ok(t("command_linked", link=link)))
+    if platform.system() != "Windows" and str(link.parent) not in os.environ.get("PATH", "").split(os.pathsep):
+        say(t("command_path_hint", dir=link.parent))
+    say(t("command_usage", name=COMMAND_NAME))
+
+
+def remove_command() -> None:
+    """Uninstall: drop our PATH entry (the one file the wizard may put outside its data dir)."""
+    link = command_link_path()
+    if _is_our_link(link):
+        try:
+            link.unlink()
+        except OSError:
+            pass
+
+
+def opencode_here(argv: list[str]) -> None:
+    """`--here [DIR]`: the last used code model, OpenCode in DIR (default: the current folder)."""
+    index = argv.index("--here")
+    given = argv[index + 1] if index + 1 < len(argv) and not argv[index + 1].startswith("--") else None
+    workdir = Path(given or os.getcwd()).expanduser()
+    if not workdir.is_dir():
+        raise RuntimeError(t("here_no_dir", dir=workdir))
+    if not DRY_RUN:
+        write_command_script()  # keeps the launcher pointing at the wizard if its folder moved
+    profile = saved_profile()
+    if not profile or profile.kind != "code":
+        ready = [p for p in installed_profiles() if p.kind == "code"]
+        profile = ready[0] if ready else choose_profile("code")
+    profile = ensure_installed(profile)
+    state = bring_up(profile)
+    launch_opencode(profile, state, workdir.resolve())
+    if ask(t("here_server"), [t("here_keep"), t("here_stop")], 1) == 2:
+        stop_server()
 
 
 def run_opencode(profile: Profile | None) -> Profile:
@@ -2562,7 +2695,7 @@ def start_menu() -> Profile | None:
         ready = installed_profiles()
         if not ready:
             return launch(None)
-        extra = ["new", "tests", "menu", "exit"]
+        extra = ["new", "tests", "command", "menu", "exit"]
         options = [t("start.run", what=profile_title(p)) for p in ready] + [t("start." + e) for e in extra]
         choice = ask(t("start_title"), options, 1)
         if choice <= len(ready):
@@ -2572,6 +2705,8 @@ def start_menu() -> Profile | None:
             return launch(None)
         if action == "tests":
             run_test_cases()
+        elif action == "command":
+            install_command()
         elif action == "menu":
             return saved_profile()
         elif action == "exit":
@@ -2579,7 +2714,7 @@ def start_menu() -> Profile | None:
 
 
 def menu(profile: Profile | None) -> None:
-    actions = ["stop_exit", "keep_exit", "opencode", "switch", "tests", "bench", "chat", "models", "status",
+    actions = ["stop_exit", "keep_exit", "opencode", "switch", "tests", "command", "bench", "chat", "models", "status",
                "uninstall"]
     while True:
         labels = [t("menu." + a) for a in actions]
@@ -2597,6 +2732,8 @@ def menu(profile: Profile | None) -> None:
             profile = launch(choose_profile())
         elif choice == "tests":
             run_test_cases()
+        elif choice == "command":
+            install_command()
         elif choice == "bench":
             speed_test(profile if profile and profile.kind == "code" else choose_profile("code"))
             profile = saved_profile()
@@ -2613,6 +2750,13 @@ def menu(profile: Profile | None) -> None:
 
 def main(argv: list[str]) -> int:
     try:
+        if "--stop" in argv:
+            stop_server()
+            return 0
+        if "--here" in argv:  # the `local-opencode` command: no menus, no update check, fast start
+            migrate_layout()
+            opencode_here(argv)
+            return 0
         banner()
         check_for_update(argv)
         migrate_layout()

@@ -104,7 +104,10 @@ LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d)" LOCAL_AI_STARTER
 
 - Python 3.9+ and stdlib only. `X | None` only in annotations (`from __future__ import annotations`),
   and no nested same-quote f-strings (3.12+).
-- Nothing outside the data dir. The server binds `127.0.0.1` only.
+- Nothing outside the data dir, with one consented exception: the `local-opencode` link in
+  `~/.local/bin` (Windows: WindowsApps), created by the "Command" menu item and removed by `uninstall()`.
+  `--here [DIR]` (what the command runs) and `--stop` skip the menus and the update check; the wizard
+  writes nothing into `DIR`. The server binds `127.0.0.1` only.
 - No Cyrillic outside `STRINGS["ru"]`. Every new string needs both `en` and `ru`.
 - Cross-platform branches matter: on Windows `os.kill(pid, 0)` kills the process (so `pid_alive`
   uses `tasklist`), keys come from `msvcrt`, ANSI is enabled via `SetConsoleMode`, and stopping

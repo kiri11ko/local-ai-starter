@@ -15,6 +15,9 @@ OpenCode или сеанса генерации, меню управления �
   первой), затем «Скачать новую конфигурацию», «Тест-кейсы» ([test-cases](test-cases.md), после них меню
   показывается снова), «Меню управления», «Выйти». Подпись строки — `profile_title()` (`:2331`):
   «Вид · модель · движок · квантование».
+- Режимы без меню: `--here [DIR]` (`opencode_here`) и `--stop` обрабатываются в `main` до баннера и проверки
+  обновлений, см. [opencode-integration](opencode-integration.md). Пункт «Команда для OpenCode в любой папке»
+  есть и в стартовом меню, и в меню управления.
 - `launch(profile)` — `local_ai_starter.py:2549`: `None` → `choose_profile()`; код → `run_opencode`,
   остальное → `media_session` ([sd-engine](sd-engine.md), [speech](speech.md)).
 - `migrate_layout()` — `local_ai_starter.py:2301`: раскладка v2 (`bin/`, `models/<family>/`) переезжает

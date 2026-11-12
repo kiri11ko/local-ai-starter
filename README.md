@@ -42,6 +42,22 @@ stop the server, keep it running, go back, another configuration, test cases, sp
 test, web chat in the browser (llama.cpp only), models on disk, status and log, delete
 everything. `RunMe --menu` (or `python3 local_ai_starter.py --menu`) opens this menu only.
 
+### OpenCode in your own project
+
+The menu item "Command for OpenCode in any folder" creates a `local-opencode` command (a small
+launcher in `local-ai/bin/`) and, if you agree, links it into `~/.local/bin` (Windows:
+`%LOCALAPPDATA%\Microsoft\WindowsApps`). Then, in any terminal folder:
+
+```
+cd ~/my-project
+local-opencode          # starts the server with the last used model, opens OpenCode here
+local-opencode --stop   # stops the model server
+```
+
+OpenCode keeps using the isolated settings from `local-ai/`, your own OpenCode setup is not touched,
+and nothing is written into the project folder by the wizard. When you quit OpenCode, it asks
+whether to keep the server running. "Delete everything" also removes the command from `~/.local/bin`.
+
 ## Blocked or slow networks
 
 Before downloading, the wizard asks each server for its first byte and waits up to

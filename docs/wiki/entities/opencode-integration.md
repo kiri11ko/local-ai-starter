@@ -25,6 +25,18 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 - `launch_opencode()` — `local_ai_starter.py:1689`: подсказка с примером задачи, затем OpenCode
   в этом терминале. SIGINT в мастере на это время игнорируется, Ctrl+C достаётся OpenCode.
 
+- `launch_opencode(profile, state, workdir=None)` принимает чужую папку: `prepare_workspace()` тогда
+  не вызывается, OpenCode получает `--model local-ai-starter/<api_model>` (проектный `opencode.json`
+  в чужой папке приоритетнее `OPENCODE_CONFIG` и мог бы подменить модель).
+- Команда `local-opencode` (добавлено 2026-11-12): `write_command_script()` пишет `local-ai/bin/local-opencode[.cmd]`
+  с абсолютными путями к python и мастеру и вызовом `--here "$PWD"`; `install_command()` (пункт меню
+  «Команда для OpenCode в любой папке») по согласию кладёт симлинк в `~/.local/bin` (Windows: копию
+  в `%LOCALAPPDATA%\Microsoft\WindowsApps`), чужой файл не перезаписывает, при отсутствии папки в `PATH`
+  показывает строку для `~/.zshrc`; `remove_command()` вызывается из `uninstall()`.
+  `opencode_here(argv)` — режим `--here [DIR]`: последний code-профиль → `ensure_installed` → `bring_up` →
+  OpenCode в `DIR` → вопрос «оставить сервер / остановить». `--stop` останавливает сервер.
+  Единственный файл вне data dir, и только с согласия пользователя.
+
 ## Collaborators
 - [server-lifecycle](server-lifecycle.md) — порт и `ctx`, [profiles](profiles.md) — модель,
   [network](network.md) — загрузка.
