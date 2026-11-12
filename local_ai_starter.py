@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import os
 import platform
@@ -517,6 +518,16 @@ STRINGS = {
         "tests_check": "Check: {result}",
         "tests_saved": "Summary: {file}",
         "tests_open": "Open the results folder?",
+        "share_title": "Send the results to the developers",
+        "share_preview": "This is exactly what will be sent. There are no prompts, model answers, file paths or user names in it:",
+        "share_ask": "Send it? A ready text is copied to the clipboard and a GitHub page opens: paste it there (Ctrl+V / \u2318V) and press Submit. A free GitHub account is needed.",
+        "share_yes": "Yes, copy and open the page",
+        "share_file": "Only save to a file, I will send it myself",
+        "share_no": "No, do not send",
+        "share_saved": "Saved: {file}",
+        "share_copied": "Copied to the clipboard.",
+        "share_not_copied": "Could not copy automatically. Open the file above and paste its text into the page.",
+        "share_opened": "The page is open. Press Ctrl+V / \u2318V in the text field, then Submit.",
         "unit.image": "image", "unit.video": "frame", "unit.speech": "second of audio",
         "status.ok": "Done", "status.fail": "Failed", "status.timeout": "Timed out",
         "check.pass": "passed", "check.fail": "failed",
@@ -720,6 +731,16 @@ STRINGS = {
         "tests_check": "Проверка: {result}",
         "tests_saved": "Сводка: {file}",
         "tests_open": "Открыть папку с результатами?",
+        "share_title": "Отправка результатов разработчикам",
+        "share_preview": "Вот что именно будет отправлено. Ни запросов, ни ответов моделей, ни путей к файлам, ни имени пользователя здесь нет:",
+        "share_ask": "Отправить? Готовый текст скопируется в буфер обмена и откроется страница GitHub: вставьте его туда (Ctrl+V / \u2318V) и нажмите Submit. Нужен бесплатный аккаунт GitHub.",
+        "share_yes": "Да, скопировать и открыть страницу",
+        "share_file": "Только сохранить в файл, отправлю сам",
+        "share_no": "Нет, не отправлять",
+        "share_saved": "Сохранено: {file}",
+        "share_copied": "Скопировано в буфер обмена.",
+        "share_not_copied": "Автоматически скопировать не удалось. Откройте файл выше и вставьте его текст на страницу.",
+        "share_opened": "Страница открыта. Нажмите Ctrl+V / \u2318V в поле текста, затем Submit.",
         "unit.image": "картинку", "unit.video": "кадр", "unit.speech": "секунду звука",
         "status.ok": "Готово", "status.fail": "Не удалось", "status.timeout": "Не уложилось во время",
         "check.pass": "пройдена", "check.fail": "не пройдена",
@@ -2161,6 +2182,77 @@ def write_summary() -> None:
     (RESULTS_DIR / "results.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+SHARE_FIELDS = ["date", "case", "kind", "model", "engine", "quant", "chip", "ram_gb", "status", "check", "wall_s",
+                "peak_mem_gb", "input_tokens", "output_tokens", "reasoning_tokens", "tool_calls", "prefill_tok_s",
+                "gen_tok_s", "units", "s_per_unit"]  # no run id, output path or notes: those can hold paths
+
+
+def build_report(rows: list[dict]) -> str:
+    """Markdown for a GitHub issue: machine, wizard version, a readable table and the same rows as CSV."""
+    ram = ram_gb() or 0
+    head = [f"Local AI Starter {VERSION}", f"{platform.system()} {platform.release()} {platform.machine()}, "
+            f"{chip_name()}, {ram:.0f} GB RAM", ""]
+    table = ["| " + " | ".join(SHARE_FIELDS) + " |", "|" + "---|" * len(SHARE_FIELDS)]
+    for row in rows:
+        table.append("| " + " | ".join(str(row.get(k) or "") for k in SHARE_FIELDS) + " |")
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=SHARE_FIELDS, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return "\n".join(head + table + ["", "<details><summary>CSV</summary>", "", "```csv", buffer.getvalue().rstrip(),
+                                     "```", "", "</details>", ""])
+
+
+def copy_to_clipboard(text: str) -> bool:
+    system = platform.system()
+    if system == "Darwin":
+        commands = [["pbcopy"]]
+    elif system == "Windows":
+        commands = [["clip"]]
+    else:
+        commands = [c for c in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "-ib"])
+                    if shutil.which(c[0])]
+    data = text.encode("utf-16") if system == "Windows" else text.encode("utf-8")  # clip.exe wants a BOM
+    for command in commands:
+        try:
+            if subprocess.run(command, input=data, timeout=10, capture_output=True).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def share_results(rows: list[dict], run_id: str) -> None:
+    """Offers to send a run's numbers to the developers as a GitHub issue: the user sees and submits it."""
+    if not rows:
+        return
+    report = build_report(rows)
+    say("\n" + bold(t("share_title")))
+    say(dim(t("share_preview")))
+    say(report)
+    if DRY_RUN:
+        say(t("dry_run_would", what="copy the report and open a new GitHub issue"))
+        return
+    choice = ask(t("share_ask"), [t("share_yes"), t("share_file"), t("share_no")], 1)
+    if choice == 3:
+        return
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    file = RESULTS_DIR / f"share-{run_id}.md"
+    file.write_text(report, encoding="utf-8")
+    say(ok(t("share_saved", file=file)))
+    if choice == 2:
+        return
+    say(ok(t("share_copied")) if copy_to_clipboard(report) else t("share_not_copied"))
+    models = ", ".join(sorted({r["model"] for r in rows}))
+    query = urllib.parse.urlencode({"title": f"Test results: {models}"[:100],
+                                    "body": "Paste the copied results here (Ctrl+V / Cmd+V)."})
+    try:
+        webbrowser.open(f"https://github.com/{UPDATE_REPO}/issues/new?{query}")
+        say(t("share_opened"))
+    except webbrowser.Error:
+        pass
+
+
 def run_test_cases() -> None:
     cases = load_cases()
     if not cases:
@@ -2188,12 +2280,14 @@ def run_test_cases() -> None:
     if not yes_no(t("start"), True):
         return
     run_id = time.strftime("%Y%m%d-%H%M%S")
+    rows: list[dict] = []
     try:
         for index, (profile, case) in enumerate(runs, 1):
             say("\n" + bold(t("tests_run", i=index, n=len(runs), case=case["title"], model=profile_title(profile))))
             if not engine_installed(profile.engine) or (profile.kind == "code" and not opencode_binary()):
                 profile = ensure_installed(profile)
             row = run_case(case, profile, TEST_RUNS_DIR / run_id / case["id"] / profile.key, run_id)
+            rows.append(row)
             line = t("tests_status", status=t("status." + (row["status"] or "fail")), sec=float(row["wall_s"] or 0),
                      mem=mem_text(float(row["peak_mem_gb"] or 0) * 1024))
             say((ok if row["status"] == "ok" else fail)(line))
@@ -2215,6 +2309,7 @@ def run_test_cases() -> None:
         say("\n" + ok(t("tests_saved", file=RESULTS_DIR / "results.md")))
         if not DRY_RUN and yes_no(t("tests_open"), True):
             open_folder(RESULTS_DIR)
+    share_results(rows, run_id)
 
 
 # ───────────────────────────── updates ─────────────────────────────

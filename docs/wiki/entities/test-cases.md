@@ -39,6 +39,14 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py), [`test-cases/`](.
   `test-results/results.csv` (колонки `RESULT_FIELDS`, `:1903`) и пересборка `results.md` —
   по каждому кейсу последний прогон каждой модели.
 
+- Отправка результатов (добавлено 2026-11-12): после прогона `run_test_cases()` вызывает `share_results(rows, run_id)`.
+  `build_report()` собирает markdown (версия, система, чип, ОЗУ, таблица и тот же CSV в `<details>`) только по
+  строкам этого прогона и только по полям `SHARE_FIELDS` — без `run`, `output`, `notes` (там бывают пути).
+  Пользователь видит текст целиком, выбирает «скопировать и открыть страницу» / «только файл» / «нет».
+  Копирование: `copy_to_clipboard()` (pbcopy, clip с BOM UTF-16, wl-copy/xclip/xsel); страница
+  `github.com/<UPDATE_REPO>/issues/new?title=…` — тело вставляет сам пользователь (в URL длинный отчёт не
+  умещается). Файл `test-results/share-<run>.md` сохраняется всегда. Ни токенов, ни сервера не нужно.
+
 ## Collaborators
 [opencode-integration](opencode-integration.md), [server-lifecycle](server-lifecycle.md),
 [sd-engine](sd-engine.md), [speech](speech.md), [speed-test](speed-test.md) (ранний замер скорости).

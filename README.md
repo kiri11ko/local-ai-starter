@@ -149,6 +149,13 @@ The `test-cases/` folder holds ready-made tasks for comparing models: start menu
 
 The wizard measures everything itself; the model does not report its own numbers.
 
+After a run the wizard offers to send the numbers to the developers. It shows the exact text
+first: wizard version, system, chip, RAM, and per run the model, engine, status, time, memory and
+token speed. There are no prompts, model answers, file paths or user names. On "Yes" the text is
+copied to the clipboard and a new GitHub issue opens: paste it and press Submit (a free GitHub
+account is needed). Nothing is sent without that last click. The text is also saved as
+`local-ai/test-results/share-<run>.md`.
+
 - Code: the model works through `opencode run` in a fresh folder, OpenCode approves its
   actions on its own (inside `local-ai/test-runs/` only). Recorded: wall time, peak memory of
   the model server, tokens in / out / thinking / cached and tool calls from OpenCode's
