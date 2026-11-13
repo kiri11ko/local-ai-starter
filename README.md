@@ -58,6 +58,22 @@ OpenCode keeps using the isolated settings from `local-ai/`, your own OpenCode s
 and nothing is written into the project folder by the wizard. When you quit OpenCode, it asks
 whether to keep the server running. "Delete everything" also removes the command from `~/.local/bin`.
 
+### Transfer AI agent settings
+
+The management menu offers an optional, one-time transfer between Claude Code, Codex and
+OpenCode. Select the source, destination, global settings and/or a project or the immediate
+subdirectories of a projects folder. For OpenCode global settings you can select the user's
+installation, the isolated installation, or both. A preview lists the first 40 file operations
+and the number of remaining operations before confirmation;
+existing files are skipped, never overwritten. Dry-run mode does not write anything.
+
+The transfer covers root instruction files, skill files and simple Markdown commands between
+Claude Code and OpenCode. Commands with frontmatter or shell expansion are skipped. Codex slash
+commands, Claude rules, agent definitions, MCP, hooks, model settings, credentials and history
+are not transferred. Skill scripts, imports and tool-specific syntax require manual review;
+copied instructions do not guarantee identical behavior. Project selection does not scan nested
+projects. Back up and review your configuration before using the transferred files.
+
 ## Blocked or slow networks
 
 Before downloading, the wizard asks each server for its first byte and waits up to
@@ -68,8 +84,8 @@ and resumes where it stopped. Everything already downloaded is kept for the next
 
 ## What goes on disk
 
-Everything lives in the `local-ai` folder next to the script. Nowhere else:
-PATH, shell configs and your global OpenCode settings are never touched.
+Normally everything lives in `local-ai` next to the script. The optional command link and the
+explicitly confirmed agent-settings transfer are exceptions. PATH and shell configs are not changed.
 
 ```
 local-ai/

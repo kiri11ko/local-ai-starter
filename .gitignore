@@ -1,3 +1,5 @@
 local-ai/
 __pycache__/
 .DS_Store
+.promts/
+tests/__pycache__/

@@ -9,14 +9,15 @@ Test cases from ``test-cases/`` run on the downloaded models and are measured by
 Everything the script downloads or creates lives in the ``local-ai`` folder next to
 it: engines (``engines/llama.cpp``, ``engines/mlx``, ``engines/stable-diffusion.cpp``), models
 (``models/<engine>/...``), OpenCode, its settings, the workspace, generated files, test runs,
-logs and results. Deleting that folder removes everything. The server listens on 127.0.0.1
-only. PATH, shell configs and global OpenCode settings are never touched.
+logs and results. The optional command link and confirmed agent-settings transfer write outside
+that folder. The server listens on 127.0.0.1 only; PATH and shell configs are not modified.
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -40,7 +41,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "2.3.0"  # must match the GitHub release tag (vX.Y.Z)
+VERSION = "2.4.0"  # must match the GitHub release tag (vX.Y.Z)
 
 DRY_RUN = os.environ.get("LOCAL_AI_STARTER_DRY_RUN") == "1"
 DEFAULT_PORT = 8080
@@ -749,6 +750,60 @@ STRINGS = {
         "demo_text": "Попросите помощника: «измени заголовок и добавь переключатель тёмной темы».",
     },
 }
+
+
+STRINGS["en"].update({
+    "menu.transfer": "Transfer AI agent settings",
+    "transfer.source": "Choose the source assistant",
+    "transfer.targets": "Choose destination assistants",
+    "transfer.both": "Both other assistants",
+    "transfer.oc": "Which OpenCode environment?",
+    "transfer.oc_user": "User's OpenCode",
+    "transfer.oc_local": "OpenCode included with this starter",
+    "transfer.oc_both": "Both OpenCode environments",
+    "transfer.scope": "What should be transferred?",
+    "transfer.global": "Global settings only",
+    "transfer.project": "One project only",
+    "transfer.projects": "Projects in a folder only",
+    "transfer.all": "Global settings and projects in a folder",
+    "transfer.path": "Enter the project or projects folder path",
+    "transfer.invalid": "Not a directory: {path}",
+    "transfer.projects_found": "Projects to inspect:",
+    "transfer.preview": "Transfer preview (existing files are never overwritten):",
+    "transfer.copy": "COPY",
+    "transfer.skip": "SKIP: destination exists or is unsafe",
+    "transfer.none": "No transferable files found.",
+    "transfer.warning": "Only instruction files, skill files and simple Claude/OpenCode Markdown commands are copied. Rules, agent definitions, MCP, hooks, settings, credentials and history are not transferred. Review tool-specific syntax, imports and executable skill scripts manually; behavior may differ. Codex has no equivalent slash-command transfer here.",
+    "transfer.confirm": "Apply the listed copies? Files may contain instructions or executable scripts.",
+    "transfer.done": "Copied {copied}; skipped {skipped}.",
+    "transfer.more": "... and {count} more file operations (showing the first 40).",
+})
+STRINGS["ru"].update({
+    "menu.transfer": "Перенос настроек AI-агентов",
+    "transfer.source": "Выберите исходного помощника",
+    "transfer.targets": "Выберите получателей",
+    "transfer.both": "Оба других помощника",
+    "transfer.oc": "Какой OpenCode использовать?",
+    "transfer.oc_user": "Обычный OpenCode пользователя",
+    "transfer.oc_local": "OpenCode внутри этого скрипта",
+    "transfer.oc_both": "Оба варианта OpenCode",
+    "transfer.scope": "Что перенести?",
+    "transfer.global": "Только глобальные настройки",
+    "transfer.project": "Только один проект",
+    "transfer.projects": "Только проекты в папке",
+    "transfer.all": "Глобальные настройки и проекты в папке",
+    "transfer.path": "Введите путь к проекту или папке проектов",
+    "transfer.invalid": "Это не папка: {path}",
+    "transfer.projects_found": "Проекты для проверки:",
+    "transfer.preview": "План переноса (существующие файлы не перезаписываются):",
+    "transfer.copy": "КОПИРОВАТЬ",
+    "transfer.skip": "ПРОПУСТИТЬ: файл существует или путь небезопасен",
+    "transfer.none": "Подходящих файлов не найдено.",
+    "transfer.warning": "Переносятся только файлы инструкций, навыков и простые Markdown-команды Claude/OpenCode. Правила, агенты, MCP, хуки, настройки, ключи и история не переносятся. Проверьте специфичный синтаксис, импорты и исполняемые скрипты навыков вручную: поведение может отличаться. Перенос slash-команд в Codex здесь не поддерживается.",
+    "transfer.confirm": "Выполнить указанные копирования? Файлы могут содержать инструкции и исполняемые скрипты.",
+    "transfer.done": "Скопировано: {copied}; пропущено: {skipped}.",
+    "transfer.more": "... и ещё {count} операций с файлами (показаны первые 40).",
+})
 
 
 def detect_lang() -> str:
@@ -2329,7 +2384,7 @@ def check_for_update(argv: list[str]) -> None:
     try:
         _, release = http_json(UPDATE_API, timeout=UPDATE_TIMEOUT, headers={"Accept": "application/vnd.github+json"})
         tag = str(release.get("tag_name") or "")
-    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, AttributeError):
         say(dim(t("update_check_failed")))
         return
     latest = _version_tuple(tag)
@@ -2355,7 +2410,7 @@ def apply_update(tag: str) -> bool:
         if (APP_DIR / ".git").exists() and shutil.which("git"):
             return _update_git(tag)
         return _update_zip(tag)
-    except (urllib.error.URLError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+    except (urllib.error.URLError, OSError, http.client.HTTPException, RuntimeError, subprocess.SubprocessError) as error:
         say(fail(t("update_failed", error=error)))
         return False
 
@@ -2784,6 +2839,144 @@ def launch(profile: Profile | None) -> Profile:
     return profile
 
 
+def transfer_home(agent: str, local: bool = False) -> Path:
+    if agent == "claude":
+        return Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
+    if agent == "codex":
+        return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    config = OPENCODE_HOME / "config" if local else Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))).expanduser()
+    return config / "opencode"
+
+
+def transfer_safe(path: Path) -> bool:
+    """Do not follow links, including links in parent directories."""
+    return not any(p.is_symlink() for p in (path, *path.parents))
+
+
+def transfer_files(folder: Path):
+    if not folder.is_dir() or not transfer_safe(folder):
+        return
+    for base, dirs, files in os.walk(folder, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not (Path(base) / d).is_symlink())
+        for name in sorted(files):
+            path = Path(base) / name
+            if path.is_file() and transfer_safe(path):
+                yield path
+
+
+def transfer_plan(source: str, targets: list[tuple[str, bool]], projects: list[Path],
+                  include_global: bool, source_local: bool = False) -> list[tuple[Path, Path]]:
+    """Build a read-only plan; never infer equivalents for settings or security policies."""
+    plan = []
+    home = Path.home()
+    for project in ([None] if include_global else []) + projects:
+        source_base = transfer_home(source, source_local) if project is None else project
+        source_instruction = source_base / ("CLAUDE.md" if source == "claude" else "AGENTS.md")
+        if project is not None and source == "claude" and not source_instruction.is_file():
+            source_instruction = project / ".claude" / "CLAUDE.md"
+        if source == "codex" and (source_base / "AGENTS.override.md").is_file():
+            source_instruction = source_base / "AGENTS.override.md"
+        if project is None:
+            source_skills = (home / ".agents" / "skills") if source == "codex" else source_base / "skills"
+            source_commands = source_base / "commands"
+        else:
+            source_skills = project / {"claude": ".claude", "codex": ".agents", "opencode": ".opencode"}[source] / "skills"
+            source_commands = project / {"claude": ".claude", "codex": ".codex", "opencode": ".opencode"}[source] / "commands"
+        for target, local in targets:
+            target_base = transfer_home(target, local) if project is None else project
+            dest_instruction = target_base / ("CLAUDE.md" if target == "claude" else "AGENTS.md")
+            if source_instruction.is_file() and transfer_safe(source_instruction) and source_instruction != dest_instruction:
+                # Codex ignores AGENTS.md in the presence of an override.
+                if target != "codex" or not (target_base / "AGENTS.override.md").exists():
+                    plan.append((source_instruction, dest_instruction))
+            if project is None:
+                dest_skills = home / ".agents" / "skills" if target == "codex" else target_base / "skills"
+                dest_commands = target_base / "commands"
+            else:
+                dest_skills = project / {"claude": ".claude", "codex": ".agents", "opencode": ".opencode"}[target] / "skills"
+                dest_commands = project / {"claude": ".claude", "codex": ".codex", "opencode": ".opencode"}[target] / "commands"
+            for path in transfer_files(source_skills):
+                dest = dest_skills / path.relative_to(source_skills)
+                if path != dest:
+                    plan.append((path, dest))
+            if source != "codex" and target != "codex":
+                for path in transfer_files(source_commands):
+                    # Metadata and shell expansion are tool-specific; do not silently convert them.
+                    if path.suffix == ".md" and not path.read_bytes().lstrip().startswith(b"---"):
+                        if b"!`" not in path.read_bytes():
+                            plan.append((path, dest_commands / path.relative_to(source_commands)))
+    return list(dict.fromkeys(plan))
+
+
+def transfer_apply(plan: list[tuple[Path, Path]]) -> tuple[int, int]:
+    copied = skipped = 0
+    for source, dest in plan:
+        if not transfer_safe(source) or not transfer_safe(dest) or not source.is_file() or dest.exists():
+            skipped += 1
+            continue
+        if DRY_RUN:
+            copied += 1
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not transfer_safe(dest):
+            skipped += 1
+            continue
+        try:
+            with source.open("rb") as src, dest.open("xb") as dst:
+                shutil.copyfileobj(src, dst)
+            shutil.copymode(source, dest)
+            copied += 1
+        except FileExistsError:
+            skipped += 1
+    return copied, skipped
+
+
+def transfer_settings() -> None:
+    agents = ["claude", "codex", "opencode"]
+    names = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}
+    source = agents[ask(t("transfer.source"), [names[a] for a in agents]) - 1]
+    others = [a for a in agents if a != source]
+    pick = ask(t("transfer.targets"), [names[a] for a in others] + [t("transfer.both")], 3)
+    selected = others if pick == 3 else [others[pick - 1]]
+    local_options = [False]
+    source_local = False
+    if source == "opencode" or "opencode" in selected:
+        options = [t("transfer.oc_user"), t("transfer.oc_local")]
+        if "opencode" in selected:
+            options.append(t("transfer.oc_both"))
+        oc_pick = ask(t("transfer.oc"), options)
+        source_local = source == "opencode" and oc_pick == 2
+        local_options = [False, True] if oc_pick == 3 else [oc_pick == 2]
+    targets = [(a, local) for a in selected for local in (local_options if a == "opencode" else [False])]
+    scope = ask(t("transfer.scope"), [t("transfer." + k) for k in ("global", "project", "projects", "all")])
+    projects = []
+    if scope != 1:
+        answer = ask_text(t("transfer.path"))
+        if not answer:
+            return
+        path = Path(answer).expanduser().absolute()
+        if not path.is_dir() or not transfer_safe(path):
+            raise RuntimeError(t("transfer.invalid", path=path))
+        projects = [path] if scope == 2 else sorted(p for p in path.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith("."))
+        say(t("transfer.projects_found"))
+        for project in projects:
+            say(f"  {project}")
+    say(t("transfer.warning"))
+    plan = transfer_plan(source, targets, projects, scope in (1, 4), source_local)
+    if not plan:
+        say(t("transfer.none"))
+        return
+    say(t("transfer.preview"))
+    for src, dst in plan[:40]:
+        status = "transfer.skip" if dst.exists() or not transfer_safe(dst) else "transfer.copy"
+        say(f"  {t(status)}: {src} → {dst}")
+    if len(plan) > 40:
+        say(t("transfer.more", count=len(plan) - 40))
+    if yes_no(t("transfer.confirm"), default_yes=False):
+        copied, skipped = transfer_apply(plan)
+        say(t("transfer.done", copied=copied, skipped=skipped))
+
+
 def start_menu() -> Profile | None:
     """First screen: start any downloaded configuration, download a new one, or run test cases."""
     while True:
@@ -2809,7 +3002,7 @@ def start_menu() -> Profile | None:
 
 
 def menu(profile: Profile | None) -> None:
-    actions = ["stop_exit", "keep_exit", "opencode", "switch", "tests", "command", "bench", "chat", "models", "status",
+    actions = ["stop_exit", "keep_exit", "opencode", "switch", "tests", "command", "transfer", "bench", "chat", "models", "status",
                "uninstall"]
     while True:
         labels = [t("menu." + a) for a in actions]
@@ -2829,6 +3022,8 @@ def menu(profile: Profile | None) -> None:
             run_test_cases()
         elif choice == "command":
             install_command()
+        elif choice == "transfer":
+            transfer_settings()
         elif choice == "bench":
             speed_test(profile if profile and profile.kind == "code" else choose_profile("code"))
             profile = saved_profile()
