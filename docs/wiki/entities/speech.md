@@ -12,7 +12,7 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
   составу архивов 2026-11-05).
 - Профили `qwen3-tts-1.7b` (Q4_K_M) и `qwen3-tts-1.7b-q8` — `ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF`:
   модель (`-m`) и общий mmproj Q8_0 (`-mm`, кодек), `models/tts/`.
-- `media_command()` — `local_ai_starter.py:1799`: `-p <текст> --tts-lang <ru|en> --output <wav>`;
+- `media_command()` — `local_ai_starter.py:1910`: `-p <текст> --tts-lang <ru|en> --output <wav>`;
   язык — из тест-кейса (`lang:`) или по наличию кириллицы (`has_cyrillic`, без кириллицы в коде).
   Если в `local-ai/voices/` есть `.wav`/`.mp3`, первый передаётся как `--tts-speaker-file`
   (`speaker_file()`, `:1784`).

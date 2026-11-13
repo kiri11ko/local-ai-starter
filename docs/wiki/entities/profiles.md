@@ -18,8 +18,8 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
   `models/<engine>/`), `flag` (флаг командной строки), `repo`, `rev` (закреплённый коммит), `file`, `size`,
   `sha256` (из LFS-метаданных HF). Путь плоский — `models/<engine>/<имя файла>`, поэтому общие файлы
   (`_AE`, `_UMT5`, `_TTS_CODEC`) у разных профилей лежат один раз.
-- `_media` — `local_ai_starter.py:218`: размер профиля — сумма компонентов.
-- `_gguf` / `_mlx` — `local_ai_starter.py:209`, `:214`. Ключи `<base>` и `<base>-mlx`.
+- `_media` — `local_ai_starter.py:222`: размер профиля — сумма компонентов.
+- `_gguf` / `_mlx` — `local_ai_starter.py:213`, `:214`. Ключи `<base>` и `<base>-mlx`.
 - `_MODELS` — `local_ai_starter.py:240`, от меньшей к большей:
 
   | base | GGUF | MLX (mlx-community) | Память |
@@ -44,10 +44,10 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 
   Параметры генерации (`args`) взяты из документации sd.cpp (`docs/flux.md`, `z_image.md`, `wan.md`).
 
-- `choose_profile(kind=None)` — `local_ai_starter.py:2372`: сначала `choose_kind()` (если вид не задан),
+- `choose_profile(kind=None)` — `local_ai_starter.py:2557`: сначала `choose_kind()` (если вид не задан),
   для кода `choose_engine()` ([wizard-flow](wizard-flow.md)), затем рекомендует самую крупную модель
   этого вида с `min_ram_gb` ≤ RAM (неизвестная RAM считается как 16). Уже скачанные помечены ✓.
-  `available()` (`:2335`) убирает MLX вне Apple Silicon и sd-модели там, где нет сборки sd.cpp.
+  `available()` (`:2520`) убирает MLX вне Apple Silicon и sd-модели там, где нет сборки sd.cpp.
 - Архитектуры GGUF — `qwen35` и `qwen35moe`; закреплённый llama.cpp b12110 их знает (проверено
   по строкам `libllama` 2026-11-04). mlx-lm 0.32.2 грузит `qwen3_5`/`qwen3_5_moe` и
   отбрасывает веса зрения.

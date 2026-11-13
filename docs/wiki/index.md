@@ -24,6 +24,7 @@
 - [sd-engine](entities/sd-engine.md) — stable-diffusion.cpp: картинки и видео, сеанс генерации
 - [speech](entities/speech.md) — озвучка через llama-tts и Qwen3-TTS
 - [test-cases](entities/test-cases.md) — тест-кейсы, замеры, скрытые проверки, `results.csv`/`.md`
+- [transfer](entities/transfer.md) — перенос настроек между Claude Code, Codex и OpenCode
 - [speed-test](entities/speed-test.md) — замер скорости и `benchmarks.csv`
 - [server-lifecycle](entities/server-lifecycle.md) — запуск, контекст, готовность, остановка, `state.json`
 - [opencode-integration](entities/opencode-integration.md) — закреплённый OpenCode, конфиг, изоляция, workspace

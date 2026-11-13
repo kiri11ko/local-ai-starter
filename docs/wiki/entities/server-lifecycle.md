@@ -7,25 +7,25 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
 состояние между запусками.
 
 ## Key API
-- `server_command(profile, port, ctx)` — `local_ai_starter.py:1460`. llama.cpp:
+- `server_command(profile, port, ctx)` — `local_ai_starter.py:1566`. llama.cpp:
   `llama-server -m <models/gguf/…> --alias <key> -c <ctx> -fa on -ctk q8_0 -ctv q8_0 --jinja --metrics --host 127.0.0.1 --port <port>`
   (`--metrics` — счётчики `/metrics` для [test-cases](test-cases.md))
   (флаги проверены на b12110). MLX — см. [mlx-engine](mlx-engine.md).
-- `api_model(profile)` — `local_ai_starter.py:1455`: `<key>` для llama.cpp, `default_model` для MLX.
-- `context_size()` — `local_ai_starter.py:1445`: 32768; при RAM < 12 ГБ — 16384, от 48 ГБ — 65536.
+- `api_model(profile)` — `local_ai_starter.py:1561`: `<key>` для llama.cpp, `default_model` для MLX.
+- `context_size()` — `local_ai_starter.py:1551`: 32768; при RAM < 12 ГБ — 16384, от 48 ГБ — 65536.
   Системный промпт и инструменты OpenCode занимают около 10K токенов. KV-кэш q8_0 (llama.cpp)
   вдвое экономнее fp16.
-- `start_server` — `local_ai_starter.py:1470`: отсоединённый процесс, stdin из `/dev/null`,
+- `start_server` — `local_ai_starter.py:1576`: отсоединённый процесс, stdin из `/dev/null`,
   вывод в `server.log` с заголовком запуска. В `state.json` пишутся `pid`, `port`, `profile`,
   `engine`, `model_id`, `ctx`, `started_at`.
-- `wait_ready` — `local_ai_starter.py:1499`: до 15 минут ждёт `/health` (у обоих серверов 200,
+- `wait_ready` — `local_ai_starter.py:1605`: до 15 минут ждёт `/health` (у обоих серверов 200,
   когда модель готова), затем пробный `/v1/chat/completions` с `model_id`.
-- `bring_up` — `local_ai_starter.py:1557`: здоровый сервер с тем же профилем переиспользуется,
+- `bring_up` — `local_ai_starter.py:1663`: здоровый сервер с тем же профилем переиспользуется,
   иначе остановка и запуск на `pick_port(8080)` (8080–8129). Одновременно работает один сервер.
-- `stop_server` — `local_ai_starter.py:1534`: `taskkill /T /F` или `killpg(SIGTERM)` с запасным `kill`.
-- `pid_alive` — `local_ai_starter.py:1001`: на Windows через `tasklist`, потому что
+- `stop_server` — `local_ai_starter.py:1640`: `taskkill /T /F` или `killpg(SIGTERM)` с запасным `kill`.
+- `pid_alive` — `local_ai_starter.py:1107`: на Windows через `tasklist`, потому что
   `os.kill(pid, 0)` там убивает процесс.
-- `read_state` / `write_state` — `local_ai_starter.py:1033`, `:1040` (атомарно через `.tmp`).
+- `read_state` / `write_state` — `local_ai_starter.py:1139`, `:1040` (атомарно через `.tmp`).
 
 ## Collaborators
 - [llama-engine](llama-engine.md), [mlx-engine](mlx-engine.md), [profiles](profiles.md),

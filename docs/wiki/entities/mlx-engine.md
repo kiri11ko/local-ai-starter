@@ -10,19 +10,19 @@ llama.cpp на одной и той же модели.
 - Закрепления — `local_ai_starter.py:96-103`: `UV_VERSION` 0.13.1 + `UV_SHA256` (только
   `aarch64-apple-darwin`), `MLX_PYTHON` 3.12, `MLX_LM_VERSION` 0.32.2. mlx-lm требует
   Python ≥ 3.11, а системный `python3` на macOS — 3.9, поэтому Python ставит uv.
-- `install_mlx()` — `local_ai_starter.py:1353`. Скачивает uv (SHA-256), затем
+- `install_mlx()` — `local_ai_starter.py:1459`. Скачивает uv (SHA-256), затем
   `uv venv engines/mlx/venv --python 3.12 --clear` и `uv pip install mlx-lm==0.32.2`. В конце
   пишет маркер `.installed` с версией.
-- `uv_env()` — `local_ai_starter.py:1347`: `UV_PYTHON_INSTALL_DIR`, `UV_CACHE_DIR` внутри
+- `uv_env()` — `local_ai_starter.py:1453`: `UV_PYTHON_INSTALL_DIR`, `UV_CACHE_DIR` внутри
   `engines/mlx/`, `UV_PYTHON_PREFERENCE=only-managed`, `UV_NO_CONFIG=1`. Проверено с
   подменённым `HOME`: в него ничего не пишется.
-- `mlx_installed()` — `local_ai_starter.py:1257`: маркер совпадает с `MLX_LM_VERSION`.
+- `mlx_installed()` — `local_ai_starter.py:1363`: маркер совпадает с `MLX_LM_VERSION`.
   При смене версии мастер переустановит среду.
-- `mlx_files()` / `install_model()` — `local_ai_starter.py:1384`, `:1394`. Список файлов
+- `mlx_files()` / `install_model()` — `local_ai_starter.py:1490`, `:1394`. Список файлов
   репозитория берётся на закреплённом коммите; `.gitattributes` и `README.md` пропускаются.
   LFS-файлы проверяются по SHA-256, мелкие JSON — без хеша. Уже скачанные файлы нужного
   размера пропускаются. В конце пишется маркер `.complete`.
-- Запуск — `server_command()` (`local_ai_starter.py:1460`):
+- Запуск — `server_command()` (`local_ai_starter.py:1566`):
   `python -m mlx_lm.server --model <папка> --host 127.0.0.1 --port <p> --max-tokens 8192`,
   с `HF_HOME` внутри `engines/mlx/` и `HF_HUB_OFFLINE=1`.
 - Имя модели в API — `default_model` (`api_model()`, `local_ai_starter.py:1455`). Любое
