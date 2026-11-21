@@ -22,6 +22,7 @@ import io
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -38,10 +39,10 @@ import urllib.request
 import wave
 import webbrowser
 import zipfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-VERSION = "2.4.0"  # must match the GitHub release tag (vX.Y.Z)
+VERSION = "2.5.0"  # must match the GitHub release tag (vX.Y.Z)
 
 DRY_RUN = os.environ.get("LOCAL_AI_STARTER_DRY_RUN") == "1"
 DEFAULT_PORT = 8080
@@ -172,6 +173,10 @@ class Profile:
     args: tuple = ()            # media models: default generation arguments
     mac_args: tuple = ()        # extra arguments on macOS only
     ext: str = ""               # media models: output file extension
+    revision: str = "main"       # GGUF repository revision
+    custom_name: str = ""
+    image_input: bool = False
+    source_file: str = ""
 
     @property
     def path(self) -> Path:
@@ -191,7 +196,7 @@ class Profile:
         if self.components:
             return self.components[0].url
         if self.engine == "gguf":
-            return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
+            return f"https://huggingface.co/{self.repo}/resolve/{self.revision}/{urllib.parse.quote(self.source_file or self.file)}"
         return f"https://huggingface.co/api/models/{self.repo}/tree/{self.file}?recursive=1"
 
     @property
@@ -207,7 +212,7 @@ class Profile:
     @property
     def name(self) -> str:
         """Short model name: the part of its label before the colon."""
-        return t("model." + self.base).split(":")[0]
+        return self.custom_name or t("model." + self.base).split(":")[0]
 
 
 def _gguf(base, repo, file, quant, size, sha256, ram):
@@ -219,9 +224,9 @@ def _mlx(base, repo, commit, quant, size, ram):
     return Profile(f"{base}-mlx", base, "mlx", "qwen", repo, commit, quant, size, "", ram)
 
 
-def _media(key, kind, engine, quant, ram, components, args, ext, mac_args=()):
+def _media(key, kind, engine, quant, ram, components, args, ext, mac_args=(), image_input=False):
     return Profile(key, key, engine, "", "", "", quant, sum(c.size for c in components), "", ram,
-                   kind, tuple(components), tuple(args), tuple(mac_args), ext)
+                   kind, tuple(components), tuple(args), tuple(mac_args), ext, image_input=image_input)
 
 
 # Media files. Shared ones (Flux VAE, umt5 encoder, TTS codec) are downloaded once.
@@ -238,6 +243,12 @@ _WAN_NEGATIVE = ("static, blurry, overexposed, low quality, jpeg artifacts, subt
                  "extra fingers, bad hands, bad face, frozen frame, cluttered background")
 _VIDEO_ARGS = ("-M", "vid_gen", "--cfg-scale", "6.0", "--sampling-method", "euler", "--steps", "20",
                "-W", "832", "-H", "480", "--video-frames", "33", "--flow-shift", "3.0", "-n", _WAN_NEGATIVE)
+_WAN_VAE = Component("sd", "--vae", "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",
+                     "split_files/vae/wan_2.1_vae.safetensors", 253815318,
+                     "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b")
+_CHROMA_T5 = Component("sd", "--t5xxl", "city96/t5-v1_1-xxl-encoder-gguf", "005a6ea51a7d0b84d677b3e633bb52a8c85a83d9",
+                       "t5-v1_1-xxl-encoder-Q4_K_M.gguf", 2896123072,
+                       "6be2b0b7e2de7cf2919340c88cb802a103a997ce46c53131cec91958c1db1af4")
 
 # Ordered from small to large; the recommendation is the largest one that fits the memory.
 # GGUF and MLX lines mirror each other, so both engines can be compared on the same model.
@@ -252,6 +263,10 @@ _MODELS = [
           "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7", 48),
     _gguf("qwen3.6-35b-a3b", "ggml-org/Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-Q8_0.gguf", "Q8_0", 36903139328,
           "d8d7842cc657d720f39546878e431937c84473aa130c36371669ac17c80c7361", 64),
+    Profile("qwen3.8-27b-uncensored-q8", "qwen3.8-27b-uncensored-q8", "gguf", "qwen",
+            "orcarouter/Qwen3.8-27B-Uncensored-GGUF", "Qwen3.8-27B-Uncensored-Q8_0.gguf", "Q8_0",
+            29047084416, "31756fca94beca71ea4b8706d6fdc896dab2a3c6376ab0c1863b98512a24f8d6", 64,
+            revision="b2e5cef033c0832fff1cc8c4937865abab9455f4"),
     _mlx("qwen3.5-4b", "mlx-community/Qwen3.5-4B-4bit", "0e7ffd5c629ef7719d4cbc04069232580bfa9d9c",
          "4-bit", 3061130647, 8),
     _mlx("qwen3.5-9b", "mlx-community/Qwen3.5-9B-4bit", "8b2b98c00a6b4d291155e4890773ca8f769aee53",
@@ -290,6 +305,12 @@ _MODELS = [
                   "Qwen3-4B-Instruct-2507-Q8_0.gguf", 4280405600,
                   "391c1e410fd9f4cf2de2b510273b56a84c19ce18f4fa3bfb3774031dac4ef068")],
         ("--cfg-scale", "1.0", "--steps", "8", "-W", "1024", "-H", "1024"), "png", mac_args=("--backend", "vae=cpu")),
+    _media("chroma1-hd", "image", "sd", "Q8_0", 32, [
+        Component("sd", "--diffusion-model", "silveroxides/Chroma1-HD-GGUF", "d3b77bf4eb5b84c0b50e9a1e83f6e8074ed85f82",
+                  "Chroma1-HD-Q8_0.gguf", 9735409824, "8c8d66177bfc584573dd21584399ebc1f00bde60acbbc48ac3cc8f58f10c6094"),
+        _AE, _CHROMA_T5],
+        ("--cfg-scale", "3.0", "--sampling-method", "euler", "--steps", "40", "-W", "1024", "-H", "1024"),
+        "png", mac_args=("--backend", "vae=cpu")),
     _media("wan2.1-1.3b", "video", "sd", "Q8_0", 16, [
         Component("sd", "--diffusion-model", "calcuis/wan-1.3b-gguf", "0652f175f44055eb60cca26dd7cd89c14abe22ce",
                   "wan2.1_t2v_1.3b-q8_0.gguf", 1587083488,
@@ -306,6 +327,26 @@ _MODELS = [
                   "split_files/vae/wan2.2_vae.safetensors", 1409400960,
                   "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
         _UMT5], _VIDEO_ARGS + ("--fps", "24"), "webm"),
+    _media("wan2.2-t2v-14b", "video", "sd", "Q5_K_M", 64, [
+        Component("sd", "--diffusion-model", "QuantStack/Wan2.2-T2V-A14B-GGUF", "73eafba53a1a8f29254e4c77f92e74ea27d7cd6f",
+                  "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf", 10790416896,
+                  "67242c61f055eb40c70fb421eb7dc1bdfde9c535f47c165fdfbf0b81b8b535dd"),
+        Component("sd", "--high-noise-diffusion-model", "QuantStack/Wan2.2-T2V-A14B-GGUF", "73eafba53a1a8f29254e4c77f92e74ea27d7cd6f",
+                  "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf", 10790416896,
+                  "fe704eb3541b09edb9cb675d58443bebccbabba0c9f5353305a6e01d9d9a2478"), _WAN_VAE, _UMT5],
+        ("-M", "vid_gen", "--cfg-scale", "3.5", "--sampling-method", "euler", "--steps", "10",
+         "--high-noise-cfg-scale", "3.5", "--high-noise-steps", "8", "--flow-shift", "3.0",
+         "-W", "832", "-H", "480", "--video-frames", "33", "--fps", "16", "-n", _WAN_NEGATIVE), "webm"),
+    _media("wan2.2-i2v-14b", "video", "sd", "Q5_K_M", 64, [
+        Component("sd", "--diffusion-model", "QuantStack/Wan2.2-I2V-A14B-GGUF", "6c6717459277b9cd1f72579d78a0fd62a79e57dc",
+                  "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf", 10792055296,
+                  "c5affcba15576959fa6d63c18261275b6407c3edd5ad3d8ab1c420e96f9d05d0"),
+        Component("sd", "--high-noise-diffusion-model", "QuantStack/Wan2.2-I2V-A14B-GGUF", "6c6717459277b9cd1f72579d78a0fd62a79e57dc",
+                  "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf", 10792055296,
+                  "163e9e5ae7ff83a4598d55242c767384be8909749dc07240d388a24838e8bac6"), _WAN_VAE, _UMT5],
+        ("-M", "vid_gen", "--cfg-scale", "3.5", "--sampling-method", "euler", "--steps", "10",
+         "--high-noise-cfg-scale", "3.5", "--high-noise-steps", "8", "--flow-shift", "3.0",
+         "-W", "832", "-H", "480", "--video-frames", "33", "--fps", "16", "-n", _WAN_NEGATIVE), "webm", image_input=True),
     _media("qwen3-tts-1.7b", "speech", "tts", "Q4_K_M", 8, [
         Component("tts", "-m", "ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF", "ca27d74bc954b73dadab5b71ca265d87fc861a7c",
                   "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf", 1035965280,
@@ -341,6 +382,18 @@ STRINGS = {
         "model.qwen3.5-4b": "Qwen3.5 4B: fast, fits 8 GB",
         "model.qwen3.5-9b": "Qwen3.5 9B: balanced, 16 GB",
         "model.qwen3.8-27b": "Qwen3.8 27B: newest and smartest, slower, 32 GB",
+        "model.qwen3.8-27b-uncensored-q8": "Qwen3.8 27B Uncensored: gated Hugging Face model, 64 GB",
+        "custom_model": "Download a GGUF model from a Hugging Face link",
+        "custom_url": "Paste a Hugging Face link to a single GGUF file (empty to cancel)",
+        "custom_invalid": "Use a Hugging Face blob or resolve link to a single text-model GGUF file.",
+        "custom_metadata": "Could not find the file or its SHA-256 on Hugging Face.",
+        "custom_unknown_ram": "Custom model: memory needs and compatibility depend on the model.",
+        "hf_access": "This model may require accepting access on Hugging Face and setting HF_TOKEN.",
+        "model.chroma1-hd": "Chroma1-HD: detailed images, no aligned safety filter, 32 GB",
+        "model.wan2.2-t2v-14b": "Wan2.2 A14B: text to video, 64 GB",
+        "model.wan2.2-i2v-14b": "Wan2.2 A14B: animate an image, 64 GB",
+        "image_input": "Path to a PNG or JPEG image (you can drag it here; empty to go back)",
+        "image_invalid": "Image not found or unsupported: use a PNG or JPEG file.",
         "model.qwen3.6-35b-a3b": "Qwen3.6 35B-A3B: large but fast (MoE), 48 GB",
         "model.qwen3.6-35b-a3b-q8": "Qwen3.6 35B-A3B, 8-bit: best quality, 64 GB",
         "pick_engine": "Which engine should run the model?",
@@ -368,6 +421,7 @@ STRINGS = {
         "update_local_changes": "Could not update automatically: this folder has local changes or a different "
                                 "history. Update by hand with git pull (release {tag}).",
         "update_failed": "The update failed: {error}. Continuing with the current version.",
+        "update_git_failed": "Git {step} failed; details are shown above. Your files have not been removed.",
         "update_bad_archive": "The release archive does not contain local_ai_starter.py.",
         "update_done": "Updated to {version}. Models and settings in local-ai/ are kept.",
         "update_restarting": "Restarting with the new version…",
@@ -554,6 +608,18 @@ STRINGS = {
         "model.qwen3.5-4b": "Qwen3.5 4B: быстрая, хватит 8 ГБ",
         "model.qwen3.5-9b": "Qwen3.5 9B: сбалансированная, 16 ГБ",
         "model.qwen3.8-27b": "Qwen3.8 27B: новейшая и самая умная, медленнее, 32 ГБ",
+        "model.qwen3.8-27b-uncensored-q8": "Qwen3.8 27B Uncensored: доступ через Hugging Face, 64 ГБ",
+        "custom_model": "Скачать GGUF-модель по ссылке Hugging Face",
+        "custom_url": "Вставьте ссылку Hugging Face на один файл GGUF (пустая строка — назад)",
+        "custom_invalid": "Нужна ссылка Hugging Face blob или resolve на один GGUF-файл текстовой модели.",
+        "custom_metadata": "Не удалось найти файл или его SHA-256 на Hugging Face.",
+        "custom_unknown_ram": "Своя модель: потребление памяти и совместимость зависят от модели.",
+        "hf_access": "Для модели может понадобиться получить доступ на Hugging Face и задать HF_TOKEN.",
+        "model.chroma1-hd": "Chroma1-HD: подробные изображения без встроенного фильтра, 32 ГБ",
+        "model.wan2.2-t2v-14b": "Wan2.2 A14B: видео по описанию, 64 ГБ",
+        "model.wan2.2-i2v-14b": "Wan2.2 A14B: оживить картинку, 64 ГБ",
+        "image_input": "Путь к PNG или JPEG (можно перетащить файл сюда; пустая строка — назад)",
+        "image_invalid": "Картинка не найдена или формат не поддерживается: нужен PNG или JPEG.",
         "model.qwen3.6-35b-a3b": "Qwen3.6 35B-A3B: большая, но быстрая (MoE), 48 ГБ",
         "model.qwen3.6-35b-a3b-q8": "Qwen3.6 35B-A3B, 8 бит: лучшее качество, 64 ГБ",
         "pick_engine": "На каком движке запускать модель?",
@@ -581,6 +647,7 @@ STRINGS = {
         "update_local_changes": "Не удалось обновить автоматически: в папке есть свои изменения или другая "
                                 "история. Обновите вручную через git pull (релиз {tag}).",
         "update_failed": "Обновление не удалось: {error}. Продолжаю на текущей версии.",
+        "update_git_failed": "Ошибка Git на этапе {step}; подробности выше. Ваши файлы не удалены.",
         "update_bad_archive": "В архиве релиза нет local_ai_starter.py.",
         "update_done": "Обновлено до {version}. Модели и настройки в local-ai/ сохранены.",
         "update_restarting": "Перезапускаю новую версию…",
@@ -1154,6 +1221,47 @@ def saved_profile() -> Profile | None:
     return PROFILES.get(read_state().get("profile", ""))
 
 
+def custom_profile(url: str) -> Profile:
+    """Resolve a single Hugging Face GGUF to immutable repository and LFS metadata."""
+    parsed = urllib.parse.urlsplit(url.strip())
+    parts = urllib.parse.unquote(parsed.path).strip("/").split("/")
+    if (parsed.scheme != "https" or parsed.netloc.lower() != "huggingface.co" or len(parts) < 5
+            or parts[2] not in ("blob", "resolve") or parsed.query or parsed.fragment
+            or any(not p or p in (".", "..") or "\\" in p for p in parts)):
+        raise RuntimeError(t("custom_invalid"))
+    repo, revision, file = "/".join(parts[:2]), parts[3], "/".join(parts[4:])
+    name = file.rsplit("/", 1)[-1]
+    if (not name.lower().endswith(".gguf") or name.lower().startswith("mmproj")
+            or re.search(r"-\d{5}-of-\d{5}\.gguf$", name, re.I)):
+        raise RuntimeError(t("custom_invalid"))
+    api = f"https://huggingface.co/api/models/{repo}/revision/{urllib.parse.quote(revision, safe='')}?blobs=true"
+    try:
+        _, metadata = http_json(api, timeout=NET_CHECK_TIMEOUT)
+        commit = metadata["sha"]
+        item = next(item for item in metadata["siblings"] if item["rfilename"] == file)
+        digest, size = item["lfs"]["sha256"], item["size"]
+        if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(r"[0-9a-f]{64}", digest) or size <= 0:
+            raise ValueError()
+    except (KeyError, StopIteration, TypeError, ValueError):
+        raise RuntimeError(t("custom_metadata")) from None
+    key = "custom-" + hashlib.sha256((repo + "/" + commit + "/" + file).encode()).hexdigest()[:20]
+    return Profile(key, key, "gguf", key, repo, name, "GGUF", size, digest, 0,
+                   revision=commit, custom_name=name, source_file=file)
+
+
+def load_custom_profiles() -> None:
+    for entry in read_state().get("custom_profiles", []):
+        try:
+            profile = Profile(**entry)
+            if (not profile.key.startswith("custom-") or profile.engine != "gguf" or profile.family != profile.key
+                    or Path(profile.file).name != profile.file or not re.fullmatch(r"custom-[0-9a-f]{20}", profile.key)
+                    or not re.fullmatch(r"[0-9a-f]{64}", profile.sha256)):
+                continue
+            PROFILES[profile.key] = profile
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+
 # ───────────────────────────── network ─────────────────────────────
 
 def _net_reason(error: BaseException, sec: int = NET_CHECK_TIMEOUT) -> str:
@@ -1183,7 +1291,15 @@ def _open(url: str, offset: int = 0, timeout: int = STALL_TIMEOUT):
     headers = {"User-Agent": "local-ai-starter"}
     if offset:
         headers["Range"] = f"bytes={offset}-"
-    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+    request = urllib.request.Request(url, headers=headers)
+    hf_authorize(request)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def hf_authorize(request: urllib.request.Request) -> None:
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if token and urllib.parse.urlsplit(request.full_url).hostname == "huggingface.co":
+        request.add_unredirected_header("Authorization", "Bearer " + token)
 
 
 def check_network(urls: list[str]) -> None:
@@ -1195,6 +1311,7 @@ def check_network(urls: list[str]) -> None:
         host = urllib.parse.urlparse(url).hostname
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "local-ai-starter", "Range": "bytes=0-0"})
+            hf_authorize(request)
             with urllib.request.urlopen(request, timeout=NET_CHECK_TIMEOUT) as response:
                 response.read(1)
         except (urllib.error.URLError, OSError) as error:
@@ -1387,10 +1504,14 @@ def engine_installed(engine: str) -> bool:
     if engine == "mlx":
         return mlx_installed()
     if engine == "sd":
-        return sd_binary() is not None
+        marker = SD_DIR / ".build"
+        return sd_binary() is not None and marker.is_file() and marker.read_text().strip() == SD_BUILD
     if engine == "tts":
-        return tts_binary() is not None
-    return server_binary() is not None
+        binary = tts_binary()
+    else:
+        binary = server_binary()
+    marker = LLAMA_DIR / ".build"
+    return binary is not None and marker.is_file() and marker.read_text().strip() == LLAMA_BUILD
 
 
 def llama_asset() -> tuple[str, str]:
@@ -1429,12 +1550,15 @@ def install_llama() -> None:
     if DRY_RUN:
         say(t("dry_run_would", what=f"download {url} → {LLAMA_DIR}"))
         return
+    if running_state():
+        stop_server()
     _install_archive(url, LLAMA_SHA256[plat], LLAMA_DIR, f"llama.cpp {LLAMA_BUILD}")
     for path in LLAMA_DIR.iterdir():
         if path.is_file() and path.name.startswith("llama"):
             make_executable(path)
     if not server_binary():
         raise RuntimeError(t("no_server_binary"))
+    (LLAMA_DIR / ".build").write_text(LLAMA_BUILD + "\n")
 
 
 def install_sd() -> None:
@@ -1448,6 +1572,7 @@ def install_sd() -> None:
             make_executable(path)
     if not sd_binary():
         raise RuntimeError(t("no_sd_binary"))
+    (SD_DIR / ".build").write_text(SD_BUILD + "\n")
 
 
 def uv_env() -> dict:
@@ -1529,6 +1654,7 @@ def http_json(url: str, payload: dict | None = None, timeout: int = 10, headers:
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json",
                                                               "User-Agent": "local-ai-starter", **(headers or {})})
+    hf_authorize(request)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.status, json.loads(response.read().decode() or "{}")
 
@@ -1577,7 +1703,7 @@ def start_server(profile: Profile, port: int) -> dict:
     ctx = context_size()
     command = server_command(profile, port, ctx)
     state = read_state()
-    fresh = {"port": port, "profile": profile.key, "engine": profile.engine, "model_id": api_model(profile),
+    fresh = {"port": port, "profile": profile.key, "server_profile": profile.key, "engine": profile.engine, "model_id": api_model(profile),
              "ctx": ctx, "started_at": int(time.time())}
     if DRY_RUN:
         say(t("dry_run_would", what="run " + " ".join(command)))
@@ -1656,13 +1782,14 @@ def stop_server() -> None:
     else:
         say(t("no_server"))
     state.pop("pid", None)
+    state.pop("server_profile", None)
     if STATE_FILE.exists():
         write_state(state)
 
 
 def bring_up(profile: Profile) -> dict:
     existing = running_state()
-    if existing and existing.get("profile") == profile.key and is_healthy(existing["port"]):
+    if existing and existing.get("server_profile", existing.get("profile")) == profile.key and is_healthy(existing["port"]):
         say(ok(t("server_running")))
         return existing
     if existing:
@@ -1991,13 +2118,30 @@ def media_session(profile: Profile) -> None:
         speaker = speaker_file()
         say(dim(t("speech_voice", file=speaker) if speaker else t("speech_no_voice", dir=VOICES_DIR)))
     while True:
+        overrides = {}
+        if profile.image_input:
+            raw = ask_text(t("image_input"))
+            if not raw:
+                return
+            path = Path(raw).expanduser()
+            if not path.is_file():
+                try:
+                    parts = shlex.split(raw, posix=platform.system() != "Windows")
+                    if len(parts) == 1:
+                        path = Path(parts[0].strip('"')).expanduser()
+                except ValueError:
+                    pass
+            if not path.is_file() or path.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                say(fail(t("image_invalid")))
+                continue
+            overrides["-i"] = str(path.resolve())
         text = ask_text(t("gen_prompt." + kind))
         if not text:
             return
         output = OUTPUTS_DIR / kind / f"{time.strftime('%Y%m%d-%H%M%S')}.{profile.ext}"
         say(dim(t("gen_running")))
         try:
-            result = generate(profile, text, output)
+            result = generate(profile, text, output, overrides=overrides)
         except KeyboardInterrupt:
             say("\n" + t("gen_stopped"))
             continue
@@ -2313,7 +2457,7 @@ def run_test_cases() -> None:
     if not cases:
         say(t("tests_none", dir=TEST_CASES_DIR))
         return
-    ready = installed_profiles()
+    ready = [p for p in installed_profiles() if not p.image_input]
     kinds = [k for k in KINDS if any(c["kind"] == k for c in cases)]
     options = [t("tests_kind_opt", kind=t("kind." + k), cases=sum(c["kind"] == k for c in cases),
                  models=sum(p.kind == k for p in ready)) for k in kinds]
@@ -2420,9 +2564,14 @@ def _git(*args: str) -> subprocess.CompletedProcess:
 
 
 def _update_git(tag: str) -> bool:
-    """Fast-forwards to the release tag (not to main), and only on a clean tree."""
-    status = _git("status", "--porcelain")
-    if status.returncode or status.stdout.strip():
+    """Fast-forward to the release tag, leaving unrelated untracked files alone."""
+    status = _git("status", "--porcelain", "--untracked-files=no")
+    if status.returncode:
+        say(dim((status.stderr or status.stdout).strip()))
+        say(t("update_git_failed", step="status"))
+        return False
+    if status.stdout.strip():
+        say(dim(status.stdout.strip()))
         say(t("update_local_changes", tag=tag))
         return False
     for args in (("fetch", "--tags", "--force", "origin"), ("merge", "--ff-only", f"refs/tags/{tag}")):
@@ -2430,7 +2579,7 @@ def _update_git(tag: str) -> bool:
         result = _git(*args)
         if result.returncode:
             say(dim((result.stderr or result.stdout).strip()[-400:]))
-            say(t("update_local_changes", tag=tag))
+            say(t("update_git_failed", step=args[0]))
             return False
     say(ok(t("update_done", version=tag.lstrip("vV"))))
     return True
@@ -2488,12 +2637,12 @@ def migrate_layout() -> None:
     if DRY_RUN or not ROOT.exists():
         return
     old_bin = ROOT / "bin"
-    if old_bin.is_dir() and not LLAMA_DIR.exists():
+    if (old_bin / exe("llama-server")).is_file() and not LLAMA_DIR.exists():
         LLAMA_DIR.parent.mkdir(parents=True, exist_ok=True)
         old_bin.rename(LLAMA_DIR)
     if MODELS_DIR.is_dir():
         for folder in list(MODELS_DIR.iterdir()):
-            if folder.is_dir() and folder.name not in ("gguf", "mlx"):
+            if folder.is_dir() and folder.name not in ("gguf", "mlx", "sd", "tts"):
                 target = MODELS_DIR / "gguf" / folder.name
                 target.mkdir(parents=True, exist_ok=True)
                 for item in folder.iterdir():
@@ -2525,7 +2674,7 @@ def available(profile: Profile) -> bool:
 
 def installed_profiles() -> list[Profile]:
     """Downloaded configurations, the last used one first."""
-    ready = [p for p in _MODELS if available(p) and p.installed]
+    ready = [p for p in PROFILES.values() if available(p) and p.installed]
     last = saved_profile()
     return sorted(ready, key=lambda p: p is not last)
 
@@ -2535,7 +2684,7 @@ def choose_kind() -> str:
     options = []
     for kind in kinds:
         label = t("pick_kind." + kind)
-        if any(p.kind == kind and p.installed for p in _MODELS):
+        if any(p.kind == kind and p.installed for p in PROFILES.values()):
             label += " ✓"
         options.append(label)
     return kinds[ask(t("pick_kind"), options, 1) - 1]
@@ -2560,18 +2709,31 @@ def choose_profile(kind: str | None = None) -> Profile:
     kind = kind or choose_kind()
     engine = choose_engine() if kind == "code" else None
     candidates = [p for p in PROFILES.values() if p.kind == kind and available(p) and engine in (None, p.engine)]
-    fitting = [p for p in candidates if p.min_ram_gb <= (ram or 16)]
+    fitting = [p for p in candidates if p.min_ram_gb and p.min_ram_gb <= (ram or 16)
+               and not p.image_input and p.key != "qwen3.8-27b-uncensored-q8"]
     recommended = fitting[-1] if fitting else candidates[0]
     ordered = [recommended] + [p for p in candidates if p is not recommended]
     options = []
     for profile in ordered:
-        label = f"{t('model.' + profile.base)} · {profile.quant} · {size_text(profile.size / 2**30)}"
+        label = f"{profile.custom_name or t('model.' + profile.base)} · {profile.quant} · {size_text(profile.size / 2**30)}"
         if profile.installed:
             label += " ✓"
         if profile is recommended:
             label += f" ({t('recommended')})"
         options.append(label)
-    profile = ordered[ask(t("pick_model"), options, 1) - 1]
+    if kind == "code" and engine == "gguf":
+        options.append(t("custom_model"))
+    selected = ask(t("pick_model"), options, 1) - 1
+    if selected == len(ordered):
+        url = ask_text(t("custom_url"))
+        if not url:
+            raise Cancelled()
+        profile = custom_profile(url)
+        say(dim(t("custom_unknown_ram")))
+        return profile
+    profile = ordered[selected]
+    if profile.key == "qwen3.8-27b-uncensored-q8":
+        say(dim(t("hf_access")))
     if ram and ram < profile.min_ram_gb:
         say(t("low_ram", need=profile.min_ram_gb, have=ram))
         if not yes_no(t("continue_anyway"), False):
@@ -2614,11 +2776,20 @@ def ensure_installed(profile: Profile | None) -> Profile:
                 raise Cancelled()
         if not yes_no(t("start"), True):
             raise Cancelled()
+        if profile.key.startswith("custom-"):
+            state = read_state()
+            entries = [p for p in state.get("custom_profiles", []) if p.get("key") != profile.key]
+            entries.append(asdict(profile))
+            state["custom_profiles"] = entries
+            write_state(state)
+            PROFILES[profile.key] = profile
         check_network([url for _, _, urls, _ in tasks for url in urls])
         for index, (title, _, _, action) in enumerate(tasks, 1):
             step(index, len(tasks), title)
             action()
     state = read_state()
+    if state.get("pid") and "server_profile" not in state:
+        state["server_profile"] = state.get("profile")
     state["profile"] = profile.key
     write_state(state)
     return profile
@@ -3040,6 +3211,7 @@ def menu(profile: Profile | None) -> None:
 
 def main(argv: list[str]) -> int:
     try:
+        load_custom_profiles()
         if "--stop" in argv:
             stop_server()
             return 0
