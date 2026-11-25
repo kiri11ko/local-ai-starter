@@ -37,6 +37,7 @@
   (фича переноса, страница [transfer](entities/transfer.md), публикация релиза) уже файлена
   записями выше. Порт глобальной команды `/wiki` в OpenCode — настройка окружения, в проектную
   wiki не попадает.
+<<<<<<< HEAD
 - 2026-11-25 — Подключён третий движок кода — Strata ([strata-engine](entities/strata-engine.md)):
   терминал v0.2.21 ставится закреплённым установщиком целиком внутрь `engines/strata/`
   (`STRATA_DATA_DIR`/`STRATA_BIN_DIR`), пять профилей (Flash-Next Q2_0/IQ2_XS/Coder, Inkling
@@ -47,3 +48,7 @@
   ≥16 ГБ и загрузка от 11 ГБ) — задача в [todo](todo.md). Обновлены [profiles](entities/profiles.md),
   [wizard-flow](entities/wizard-flow.md), [server-lifecycle](entities/server-lifecycle.md),
   [test](workflows/test.md), README en+ru.
+=======
+- 2026-11-21 — Добавлены пользовательские GGUF-ссылки, gated Qwen3.8 Uncensored, Chroma1-HD, Wan2.2 A14B T2V/I2V, учёт версий сборок и обновление Git при неотслеживаемых файлах. Исправлены миграция медиа и переключение сервера; проверено на временных данных. Реальные модели не загружались.
+- 2026-11-21 — Опубликован [v2.5.0](https://github.com/kiri11ko/local-ai-starter/releases/tag/v2.5.0) на `fe1a575`; проверено обновление ZIP-копии с 2.4.9, перезапуск на 2.5.0 и сохранность данных.
+>>>>>>> origin/main

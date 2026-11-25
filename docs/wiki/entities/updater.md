@@ -17,8 +17,9 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
   Предлагает только строго более новый тег (`_version_tuple`, `:2187`), показывает до 15 строк
   заметок релиза. Варианты: обновить (Enter), не сейчас, пропустить версию (`skipped_version` в
   `state.json`, до следующего релиза).
-- `apply_update(tag)` — `local_ai_starter.py:2408`:
-  - git-клон (`APP_DIR/.git` + `git` в PATH) — `_update_git` (`:2237`): только чистое дерево,
+- `apply_update(tag)`:
+  - git-клон (`APP_DIR/.git` + `git` в PATH) — `_update_git`: без изменений отслеживаемых файлов;
+    посторонние неотслеживаемые файлы не мешают, конфликтующие файлы защищены самим Git;
     `git fetch --tags --force origin`, затем `git merge --ff-only refs/tags/<tag>`. Перемотка на тег,
     а не на `main`, поэтому неопубликованные коммиты не приходят. Иначе — подсказка `git pull`;
   - ZIP-папка — `_update_zip` (`:2439`): архив тега через `download()` без хеша (у архивов

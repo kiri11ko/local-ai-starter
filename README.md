@@ -120,7 +120,7 @@ server listens on `127.0.0.1` only.
 
 ## Models
 
-The same line-up exists for both engines, so they can be compared on the same model.
+Most code models exist for both engines, so they can be compared on the same model.
 The wizard recommends the largest one that fits your memory.
 
 | Model | GGUF (llama.cpp) | MLX | Memory |
@@ -130,6 +130,14 @@ The wizard recommends the largest one that fits your memory.
 | Qwen3.8 27B | Q4_K_M, 17.7 GB | 4-bit, 15.0 GB | 32 GB |
 | Qwen3.6 35B-A3B (MoE, fast) | Q4_K_M, 19.0 GB | 4-bit, 19.0 GB | 48 GB |
 | Qwen3.6 35B-A3B, 8-bit | Q8_0, 34.4 GB | 8-bit, 35.2 GB | 64 GB |
+| Qwen3.8 27B Uncensored | Q8_0, 27.1 GB | — | 64 GB |
+
+The Uncensored repository requires Hugging Face access: request access on the
+[model page](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-GGUF), then launch
+the wizard with `HF_TOKEN` set to a Hugging Face read token. You can also choose a
+single GGUF file by pasting its Hugging Face `blob` or `resolve` link in the llama.cpp
+model menu. Its LFS SHA-256 is checked and its profile is kept in `local-ai/state.json`.
+Custom model architecture and memory requirements depend on the model.
 
 Context is 32K tokens: 16K below 12 GB of memory, 64K from 48 GB. OpenCode's
 instructions alone take about 10K. These are candidates, not a performance promise.
@@ -160,8 +168,11 @@ text). The wizard keeps Strata's key and data inside `local-ai/engines/strata/`.
 | Images | SD-Turbo | 4.9 GB | 8 GB | 512 px, 4 steps, fastest |
 | Images | Flux.1 schnell (Q4_K) | 9.7 GB | 16 GB | 1024 px, 4 steps |
 | Images | Z-Image Turbo (Q8_0) | 10.4 GB | 24 GB | 1024 px, 8 steps, readable text |
+| Images | Chroma1-HD (Q8_0) | 12.1 GB | 32 GB | 1024 px, 40 steps; no aligned safety filter according to its model card |
 | Video | Wan 2.1 1.3B (Q8_0) | 7.3 GB | 16 GB | 33 frames at 832×480, 16 fps, `.webm` |
 | Video | Wan 2.2 TI2V 5B (Q8_0) | 12.0 GB | 32 GB | 33 frames at 832×480, 24 fps, `.webm` |
+| Video | Wan 2.2 A14B T2V (Q5_K_M) | 26.0 GB | 64 GB | text to video, 33 frames |
+| Video | Wan 2.2 A14B I2V (Q5_K_M) | 26.0 GB | 64 GB | animate a PNG/JPEG, 33 frames |
 | Speech | Qwen3-TTS 1.7B (Q4_K_M) | 1.4 GB | 8 GB | 10 languages including Russian, `.wav` |
 | Speech | Qwen3-TTS 1.7B (Q8_0) | 2.1 GB | 16 GB | same, cleaner voice |
 
@@ -169,7 +180,10 @@ Images and video run on stable-diffusion.cpp, speech on `llama-tts` from the sam
 llama.cpp build as the code models. A generation is a separate run of the engine, so the
 first seconds go to loading the model. A video takes several minutes on a Mac. If a code
 model server is running, the wizard stops it first to free memory. Descriptions work best
-in English. Speech picks Russian when the text contains Cyrillic, English otherwise; to
+in English. For image-to-video, paste the image path or drag the file into the terminal.
+The A14B profiles are standard Wan models, not verified uncensored variants; actual memory use
+and generation speed vary. New profiles have not yet been tested with real generations.
+Speech picks Russian when the text contains Cyrillic, English otherwise; to
 make it sound like a particular voice, put a 5–15 second recording (`.wav` or `.mp3`)
 into `local-ai/voices/`.
 
