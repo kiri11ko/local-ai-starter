@@ -1,6 +1,6 @@
 # Local AI Starter — Wiki
 
-Мастер, который одним двойным щелчком ставит локальный ИИ: для кода — движок (llama.cpp или MLX), модель Qwen
+Мастер, который одним двойным щелчком ставит локальный ИИ: для кода — движок (llama.cpp, MLX или Strata), модель Qwen
 и OpenCode в терминале; для картинок и видео — stable-diffusion.cpp; для речи — llama-tts. Тест-кейсы
 сравнивают скачанные модели на одних задачах (macOS, Linux, Windows). Весь код — один файл
 [`local_ai_starter.py`](../../local_ai_starter.py).
@@ -21,6 +21,7 @@
 - [profiles](entities/profiles.md) — линейка моделей для обоих движков, выбор по памяти
 - [llama-engine](entities/llama-engine.md) — закреплённая сборка llama.cpp, модели GGUF
 - [mlx-engine](entities/mlx-engine.md) — MLX на Apple Silicon: uv, Python, mlx-lm, модели MLX
+- [strata-engine](entities/strata-engine.md) — Strata: Qwen3.8-Flash-Next, терминал качает движок и модели сам
 - [sd-engine](entities/sd-engine.md) — stable-diffusion.cpp: картинки и видео, сеанс генерации
 - [speech](entities/speech.md) — озвучка через llama-tts и Qwen3-TTS
 - [test-cases](entities/test-cases.md) — тест-кейсы, замеры, скрытые проверки, `results.csv`/`.md`

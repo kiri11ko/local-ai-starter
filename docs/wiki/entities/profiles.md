@@ -30,6 +30,17 @@ Source: [`local_ai_starter.py`](../../../local_ai_starter.py)
   | `qwen3.6-35b-a3b` | ggml-org Q4_K_M, 19,0 ГБ | 4-bit, 19,0 ГБ | 48 |
   | `qwen3.6-35b-a3b-q8` | ggml-org Q8_0, 34,4 ГБ | 8-bit, 35,2 ГБ | 64 |
 
+  Strata (движок третий, [strata-engine](strata-engine.md); `family`/`file` — селекторы CLI Strata,
+  память и загрузка — из его плана запуска, проверено `--plan` на SQ-10 2026-11-25):
+
+  | key | base | family/file | загрузка | Память |
+  |---|---|---|---|---|
+  | `inkling-2-mini-sq10` | `inkling-2-mini` | inkling-2-mini / SQ-10 | 11,1 ГБ | 16 |
+  | `inkling-2-mini-sq15` | `inkling-2-mini` | inkling-2-mini / SQ-15 | ≈15,4 ГБ | 24 |
+  | `qwen38-flash-next-coder` | `qwen3.8-flash-next-coder` | coder / IQ1_M | ≈36 ГБ | 32 |
+  | `qwen38-flash-next-q2_0` | `qwen3.8-flash-next` | qwen / q2_0 | ≈70 ГБ | 48 |
+  | `qwen38-flash-next-iq2_xs` | `qwen3.8-flash-next` | qwen / iq2_xs | ≈71 ГБ | 48 |
+
   Медиа (ключ = `base`, все на HF без gated-доступа, проверено 2026-11-05):
 
   | key | вид | файлы | ГБ | Память |

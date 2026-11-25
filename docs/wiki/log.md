@@ -37,3 +37,13 @@
   (фича переноса, страница [transfer](entities/transfer.md), публикация релиза) уже файлена
   записями выше. Порт глобальной команды `/wiki` в OpenCode — настройка окружения, в проектную
   wiki не попадает.
+- 2026-11-25 — Подключён третий движок кода — Strata ([strata-engine](entities/strata-engine.md)):
+  терминал v0.2.21 ставится закреплённым установщиком целиком внутрь `engines/strata/`
+  (`STRATA_DATA_DIR`/`STRATA_BIN_DIR`), пять профилей (Flash-Next Q2_0/IQ2_XS/Coder, Inkling
+  SQ-10/SQ-15), запуск и стоп через `strata launch`, ключ API генерирует мастер
+  (`--api-key-env`, в `state.json`), opencode.json получает `apiKey`. Проверено: установка
+  во временном `LOCAL_AI_STARTER_HOME`, подпись фида, `--plan` (Inkling 11,1 ГБ), dry-run en,
+  16/16 юнит-тестов `tests/test_strata.py`. Живой запуск модели не делался (нужна машина с
+  ≥16 ГБ и загрузка от 11 ГБ) — задача в [todo](todo.md). Обновлены [profiles](entities/profiles.md),
+  [wizard-flow](entities/wizard-flow.md), [server-lifecycle](entities/server-lifecycle.md),
+  [test](workflows/test.md), README en+ru.

@@ -22,6 +22,7 @@ import io
 import json
 import os
 import platform
+import secrets
 import shlex
 import shutil
 import signal
@@ -55,6 +56,7 @@ ENGINES_DIR = ROOT / "engines"
 LLAMA_DIR = ENGINES_DIR / "llama.cpp"
 MLX_DIR = ENGINES_DIR / "mlx"
 SD_DIR = ENGINES_DIR / "stable-diffusion.cpp"
+STRATA_DIR = ENGINES_DIR / "strata"     # Strata Terminal home; its engine and model downloads live here too
 MODELS_DIR = ROOT / "models"
 OPENCODE_DIR = ROOT / "opencode"
 OPENCODE_HOME = ROOT / "opencode-home"
@@ -72,7 +74,7 @@ TEST_CASES_DIR = APP_DIR / "test-cases"  # shipped with the wizard, replaced by 
 TEST_RUNS_DIR = ROOT / "test-runs"
 RESULTS_DIR = ROOT / "test-results"
 
-ENGINE_NAMES = {"gguf": "llama.cpp", "mlx": "MLX", "sd": "stable-diffusion.cpp", "tts": "llama.cpp"}
+ENGINE_NAMES = {"gguf": "llama.cpp", "mlx": "MLX", "strata": "Strata", "sd": "stable-diffusion.cpp", "tts": "llama.cpp"}
 KINDS = ["code", "image", "video", "speech"]
 
 # Updates come from GitHub Releases only, so unreleased pushes to main never reach users.
@@ -134,6 +136,21 @@ OPENCODE_SHA256 = {
 }
 OPENCODE_SIZE_MB = 80
 
+# Strata (third code engine): the Terminal runs Qwen3.8-Flash-Next and friends; it downloads the engine
+# for the graphics card and the model files itself, so the wizard pins the Terminal installer only.
+# Everything stays inside engines/strata/: the installer and every `strata` call get STRATA_DATA_DIR /
+# STRATA_BIN_DIR pointed there (the installer honours both), and model downloads go to --data-dir.
+STRATA_VERSION = "0.2.21"
+STRATA_CONTROL_VERSION = "0.1.68"
+STRATA_FEED = f"https://github.com/Niko1221/Strata/releases/download/v{STRATA_VERSION}"
+STRATA_INSTALLERS = {  # installer script -> (url, SHA-256) from the release page
+    "install.sh": (f"{STRATA_FEED}/install.sh",
+                   "d67f9fb21904dad2f19909452e67b79ba7f0fc93454b9447c3a02b91fc0002e4"),
+    "install.ps1": (f"{STRATA_FEED}/install.ps1",
+                    "231b6323ecd99b42ac645056a9c5d162b2e1610ad6d4a8956b24de996c86dde9"),
+}
+STRATA_SIZE_MB = 200  # Terminal archive plus its private Python runtime, roughly; the engine downloads at launch
+
 
 @dataclass(frozen=True)
 class Component:
@@ -177,6 +194,8 @@ class Profile:
     def path(self) -> Path:
         if self.components:
             return MODELS_DIR / self.engine
+        if self.engine == "strata":
+            return STRATA_DIR / "data"  # the folder the wizard points `strata launch --data-dir` at
         name = self.file if self.engine == "gguf" else self.repo.split("/")[-1]
         return MODELS_DIR / self.engine / self.family / name
 
@@ -184,12 +203,16 @@ class Profile:
     def label_path(self) -> str:
         if self.components:
             return f"{self.engine}/ ({', '.join(c.path.name for c in self.missing)})"
+        if self.engine == "strata":
+            return f"strata/{self.family}/{self.file}"  # Strata stores the files itself, under engines/strata/
         return str(self.path.relative_to(MODELS_DIR))
 
     @property
     def url(self) -> str:
         if self.components:
             return self.components[0].url
+        if self.engine == "strata":
+            return f"{STRATA_FEED}/install-manifest.txt"  # Strata fetches models itself and checks signatures
         if self.engine == "gguf":
             return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
         return f"https://huggingface.co/api/models/{self.repo}/tree/{self.file}?recursive=1"
@@ -202,6 +225,8 @@ class Profile:
     def installed(self) -> bool:
         if self.components:
             return not self.missing
+        if self.engine == "strata":
+            return strata_profile_installed(self)
         return self.path.is_file() if self.engine == "gguf" else (self.path / ".complete").exists()
 
     @property
@@ -217,6 +242,11 @@ def _gguf(base, repo, file, quant, size, sha256, ram):
 
 def _mlx(base, repo, commit, quant, size, ram):
     return Profile(f"{base}-mlx", base, "mlx", "qwen", repo, commit, quant, size, "", ram)
+
+
+def _strata(key, base, family, model, quant, size, ram):
+    """family is Strata's family selector (qwen, coder, ...), model is its model size (q2_0, SQ-10, ...)."""
+    return Profile(key, base, "strata", family, "", model, quant, size, "", ram)
 
 
 def _media(key, kind, engine, quant, ram, components, args, ext, mac_args=()):
@@ -262,6 +292,13 @@ _MODELS = [
          "4-bit", 20429169263, 48),
     _mlx("qwen3.6-35b-a3b-q8", "mlx-community/Qwen3.6-35B-A3B-8bit", "e06a74e6236a60c8367e1a3214e83d8b61b637b0",
          "8-bit", 37748367994, 64),
+    # Strata runs Qwen3.8-Flash-Next (the model it is built for) and Inkling-2-Mini; sizes and memory
+    # follow Strata's MODELS.md (RAM + VRAM together; the wizard checks `strata launch --plan` again).
+    _strata("inkling-2-mini-sq10", "inkling-2-mini", "inkling-2-mini", "SQ-10", "SQ-10", 11920000000, 16),
+    _strata("inkling-2-mini-sq15", "inkling-2-mini", "inkling-2-mini", "SQ-15", "SQ-15", 15400000000, 24),
+    _strata("qwen38-flash-next-coder", "qwen3.8-flash-next-coder", "coder", "IQ1_M", "IQ1_M", 36400000000, 32),
+    _strata("qwen38-flash-next-q2_0", "qwen3.8-flash-next", "qwen", "q2_0", "Q2_0", 70000000000, 48),
+    _strata("qwen38-flash-next-iq2_xs", "qwen3.8-flash-next", "qwen", "iq2_xs", "IQ2_XS", 71000000000, 48),
     _media("sd-turbo", "image", "sd", "fp32", 8, [
         Component("sd", "-m", "stabilityai/sd-turbo", "b261bac6fd2cf515557d5d0707481eafa0485ec2",
                   "sd_turbo.safetensors", 5214561328,
@@ -754,6 +791,23 @@ STRINGS = {
 
 STRINGS["en"].update({
     "menu.transfer": "Transfer AI agent settings",
+    "model.qwen3.8-flash-next": "Qwen3.8 Flash Next: 125B MoE (6B active), top agentic quality, Strata",
+    "model.qwen3.8-flash-next-coder": "Qwen3.8 Flash Next Coder: coding-tuned, half the experts, Strata",
+    "model.inkling-2-mini": "Inkling-2 Mini: small and fast, fits smaller Macs, Strata",
+    "engine.strata": "Strata: runs Qwen3.8 Flash Next; engine and models download on first start",
+    "plan_strata": "Strata Terminal {ver}",
+    "plan_strata_model": "Strata model {family} {model} (downloads during the first server start)",
+    "strata_no_engine": "Strata has no engine for this computer's graphics card, so it cannot run {family} "
+                        "{model} here. The launch plan said: {warning}",
+    "strata_missing": "The Strata Terminal is not installed where it should be ({path}).",
+    "strata_launch_failed": "Strata could not set the model up (exit {code}). Last log line: {line}. "
+                            "Details: {log}. Repeating the start resumes an interrupted download.",
+    "strata_not_started": "Strata finished but its server did not start (perhaps the model was downloaded "
+                          "without a usable engine). Last log line: {line}. Details: {log}.",
+    "strata_stopping": "Stopping the Strata server…",
+    "strata_downloading": "Strata is fetching what is missing (the engine for the graphics card, the model). "
+                          "The first start downloads tens of GB and can take a long time; an interrupted "
+                          "start resumes where it stopped.",
     "transfer.source": "Choose the source assistant",
     "transfer.targets": "Choose destination assistants",
     "transfer.both": "Both other assistants",
@@ -780,6 +834,23 @@ STRINGS["en"].update({
 })
 STRINGS["ru"].update({
     "menu.transfer": "Перенос настроек AI-агентов",
+    "model.qwen3.8-flash-next": "Qwen3.8 Flash Next: MoE 125B (6B активных), лучшее агентное качество, Strata",
+    "model.qwen3.8-flash-next-coder": "Qwen3.8 Flash Next Coder: заточен под код, половина экспертов, Strata",
+    "model.inkling-2-mini": "Inkling-2 Mini: маленькая и быстрая, для небольших Mac, Strata",
+    "engine.strata": "Strata: запускает Qwen3.8 Flash Next; движок и модели скачаются при первом старте",
+    "plan_strata": "Терминал Strata {ver}",
+    "plan_strata_model": "Модель Strata {family} {model} (скачается при первом старте сервера)",
+    "strata_no_engine": "У Strata нет движка для видеокарты этого компьютера, поэтому {family} {model} "
+                        "здесь не запустить. План запуска сообщил: {warning}",
+    "strata_missing": "Терминал Strata не установлен там, где должен быть ({path}).",
+    "strata_launch_failed": "Strata не смог подготовить модель (код {code}). Последняя строка журнала: {line}. "
+                            "Подробности: {log}. Повторный запуск продолжит прерванную загрузку.",
+    "strata_not_started": "Strata завершился, но его сервер не запустился (возможно, модель скачана, "
+                          "но подходящего движка нет). Последняя строка журнала: {line}. Подробности: {log}.",
+    "strata_stopping": "Останавливаю сервер Strata…",
+    "strata_downloading": "Strata докачивает недостающее (движок под видеокарту, модель). Первый старт "
+                          "загружает десятки гигабайт и может идти долго; прерванный старт продолжается "
+                          "с места остановки.",
     "transfer.source": "Выберите исходного помощника",
     "transfer.targets": "Выберите получателей",
     "transfer.both": "Оба других помощника",
@@ -1386,6 +1457,8 @@ def media_supported() -> bool:
 def engine_installed(engine: str) -> bool:
     if engine == "mlx":
         return mlx_installed()
+    if engine == "strata":
+        return strata_installed()
     if engine == "sd":
         return sd_binary() is not None
     if engine == "tts":
@@ -1487,6 +1560,131 @@ def install_opencode() -> None:
         raise RuntimeError(t("no_opencode_binary"))
 
 
+# ───────────────────────────── strata ─────────────────────────────
+
+def strata_env() -> dict:
+    """The Terminal, its data and its downloads all stay inside engines/strata/."""
+    return dict(os.environ, STRATA_DATA_DIR=str(STRATA_DIR), STRATA_BIN_DIR=str(STRATA_DIR / "bin"))
+
+
+def strata_binary() -> Path | None:
+    suffixes = (".exe", ".cmd") if platform.system() == "Windows" else ("",)
+    for suffix in suffixes:
+        path = STRATA_DIR / "bin" / ("strata" + suffix)
+        if path.exists():
+            return path
+    return None
+
+
+def strata_installed() -> bool:
+    version_dir = STRATA_DIR / "terminal" / STRATA_CONTROL_VERSION
+    return (version_dir / "bin" / exe("strata")).exists() or strata_binary() is not None
+
+
+def install_strata() -> None:
+    """Runs the pinned official installer; it checks signatures itself and never leaves engines/strata/."""
+    if DRY_RUN:
+        say(t("dry_run_would", what=f"install the Strata Terminal {STRATA_VERSION} → {STRATA_DIR}"))
+        return
+    script, (url, sha256) = ("install.ps1", STRATA_INSTALLERS["install.ps1"]) \
+        if platform.system() == "Windows" else ("install.sh", STRATA_INSTALLERS["install.sh"])
+    STRATA_DIR.mkdir(parents=True, exist_ok=True)
+    download(url, STRATA_DIR / script, sha256, f"Strata {STRATA_VERSION} installer")
+    if script == "install.ps1":
+        runner = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(STRATA_DIR / script)]
+    else:
+        runner = ["sh", str(STRATA_DIR / script)]
+    say(dim("$ " + " ".join(runner)))
+    try:
+        result = subprocess.run(runner, env=strata_env(), cwd=str(STRATA_DIR))
+    except OSError as error:
+        raise RuntimeError(t("strata_launch_failed", code="—", line=str(error), log=STRATA_DIR)) from None
+    if result.returncode != 0 or not strata_installed():
+        raise RuntimeError(t("strata_launch_failed", code=result.returncode, line=t("strata_missing", path=STRATA_DIR),
+                            log=STRATA_DIR))
+    (STRATA_DIR / ".installed").write_text(STRATA_CONTROL_VERSION + "\n")
+
+
+def strata_control(*args: str, timeout: int = 120) -> "subprocess.CompletedProcess[str]":
+    """One `strata` call with the wizard's data dir; raises RuntimeError when the Terminal is missing."""
+    binary = strata_binary()
+    if binary is None:
+        raise RuntimeError(t("strata_missing", path=STRATA_DIR))
+    return subprocess.run([str(binary), *args], env=strata_env(), capture_output=True, text=True,
+                          timeout=timeout, cwd=str(STRATA_DIR))
+
+
+_STRATA_MODELS: list | None = None  # cached `strata models list` for this wizard run
+
+
+def strata_models(refresh: bool = False) -> list:
+    """Installed Strata model run configs; [] when the Terminal is missing or does not answer."""
+    global _STRATA_MODELS
+    if _STRATA_MODELS is not None and not refresh:
+        return _STRATA_MODELS
+    entries: list = []
+    if strata_installed() and not DRY_RUN:
+        try:
+            result = strata_control("models", "list", "--installed", "--output", "json", timeout=60)
+            entries = json.loads(result.stdout or "{}").get("models") or []
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError):
+            entries = []
+    _STRATA_MODELS = entries
+    return entries
+
+
+def strata_profile_installed(profile: Profile) -> bool:
+    """Matches an installed run config by model size and family (either may be all it carries)."""
+    needle = profile.file.lower()
+    family = profile.family.lower()
+    for entry in strata_models():
+        text = json.dumps(entry, ensure_ascii=False).lower()
+        if needle in text and (not family or family in text):
+            return True
+    return False
+
+
+def strata_supported() -> bool:
+    """The Terminal ships for Apple Silicon (macOS 15+), x64 Linux/Windows and ARM64 Linux (DGX Spark)."""
+    system, machine = platform.system(), platform.machine().lower()
+    if system == "Darwin":
+        try:
+            major = int(platform.mac_ver()[0].split(".")[0])
+        except ValueError:
+            return False
+        return is_apple_silicon() and major >= 15
+    if system == "Linux":
+        return machine in ("x86_64", "amd64", "aarch64", "arm64")
+    if system == "Windows":
+        return machine in ("amd64", "x86_64")
+    return False
+
+
+def strata_plan(profile: Profile) -> dict | None:
+    """`strata launch --plan`: what would be downloaded and whether an engine exists for this card."""
+    if not strata_installed() or DRY_RUN:
+        return None
+    try:
+        result = strata_control("launch", "--plan", "--family", profile.family, "--model", profile.file,
+                                "--data-dir", str(STRATA_DIR / "data"), "--output", "json", timeout=300)
+        data = json.loads(result.stdout or "{}")
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError):
+        return None
+    return data.get("plan") if data.get("ok") else None
+
+
+def strata_check_plan(profile: Profile, plan: dict) -> None:
+    """Refuses to continue when the plan says the engine exists but cannot run on this card.
+
+    engine_usable is also false right after installation, when the engine is simply not downloaded
+    yet (engine_missing); the first `strata launch` fetches it, so that case must proceed.
+    """
+    download = plan.get("download") or {}
+    if download.get("engine_usable") is False and not download.get("engine_missing"):
+        warning = "; ".join(w for w in plan.get("warnings", []) if w) or "no engine for this card"
+        raise RuntimeError(t("strata_no_engine", family=profile.family, model=profile.file, warning=warning))
+
+
 def mlx_files(profile: Profile) -> list[dict]:
     """File list of an MLX repo at the pinned commit (LFS files carry their SHA-256)."""
     try:
@@ -1560,7 +1758,12 @@ def context_size() -> int:
 
 def api_model(profile: Profile) -> str:
     # mlx_lm.server treats any other model name as a new model to load; its CLI model is "default_model".
-    return "default_model" if profile.engine == "mlx" else profile.key
+    # Strata's OpenAI-compatible API serves every model under the fixed id "strata".
+    if profile.engine == "mlx":
+        return "default_model"
+    if profile.engine == "strata":
+        return "strata"
+    return profile.key
 
 
 def server_command(profile: Profile, port: int, ctx: int) -> list[str]:
@@ -1573,8 +1776,56 @@ def server_command(profile: Profile, port: int, ctx: int) -> list[str]:
             "--host", "127.0.0.1", "--port", str(port)]
 
 
+def strata_launch_command(profile: Profile, port: int, ctx: int) -> list[str]:
+    """Downloads what is missing (engine for the card, model) and starts serving; the server outlives it."""
+    return [str(strata_binary() or STRATA_DIR / "bin" / exe("strata")), "launch",
+            "--family", profile.family, "--model", profile.file, "--context", str(ctx),
+            "--port", str(port), "--data-dir", str(STRATA_DIR / "data"),
+            "--api-key-env", "LOCAL_AI_STARTER_STRATA_KEY", "--yes", "--no-tui", "--output", "json"]
+
+
+def start_strata(profile: Profile, port: int, ctx: int) -> dict:
+    """Runs `strata launch` to the end; first start downloads the model, which can take a long time."""
+    command = strata_launch_command(profile, port, ctx)
+    state = read_state()
+    fresh = {"port": port, "profile": profile.key, "engine": profile.engine, "model_id": api_model(profile),
+             "ctx": ctx, "started_at": int(time.time()),
+             "api_key": state.get("api_key") or secrets.token_urlsafe(24)}
+    if DRY_RUN:
+        say(t("dry_run_would", what="run " + " ".join(command)))
+        return dict(fresh, pid=0)
+    env = dict(strata_env(), LOCAL_AI_STARTER_STRATA_KEY=fresh["api_key"])
+    say(dim("$ " + " ".join(command)))
+    say(dim(t("strata_downloading")))
+    with LOG_FILE.open("ab") as log:
+        log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(command)}\n".encode())
+        log.flush()
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                   cwd=str(STRATA_DIR), env=env)
+        noted, started = 0.0, time.time()
+        try:
+            while process.poll() is None:
+                if time.time() - noted > 20:
+                    noted = time.time()
+                    say(dim(f"  [{int(time.time() - started)} s] {log_tail()}"))
+                time.sleep(1)
+        except KeyboardInterrupt:
+            _terminate(process)
+            raise
+    if process.returncode != 0:
+        raise RuntimeError(t("strata_launch_failed", code=process.returncode, line=log_tail(), log=LOG_FILE))
+    state.update(fresh)
+    state.pop("pid", None)  # the server is Strata's own process, not a child of the wizard
+    write_state(state)
+    global _STRATA_MODELS
+    _STRATA_MODELS = None  # the run config appears only after a successful launch
+    return state
+
+
 def start_server(profile: Profile, port: int) -> dict:
     ctx = context_size()
+    if profile.engine == "strata":
+        return start_strata(profile, port, ctx)
     command = server_command(profile, port, ctx)
     state = read_state()
     fresh = {"port": port, "profile": profile.key, "engine": profile.engine, "model_id": api_model(profile),
@@ -1605,26 +1856,35 @@ def start_server(profile: Profile, port: int) -> dict:
 def wait_ready(state: dict) -> None:
     if DRY_RUN:
         return
+    strata = state.get("engine") == "strata"
     say(dim(t("starting_server")))
-    started, last_note, limit = time.time(), 0.0, 900
+    started, last_note, limit = time.time(), 0.0, 120 if strata else 900
     while time.time() - started < limit:
         if is_healthy(state["port"]):
             break
-        if not pid_alive(state["pid"]):
+        if not strata and not pid_alive(state["pid"]):
             raise RuntimeError(t("server_stopped", line=log_tail(), log=LOG_FILE))
         if time.time() - last_note > 10:
             last_note = time.time()
             say(dim(f"  [{int(time.time() - started)} s] {log_tail()}"))
         time.sleep(1)
     else:
+        if strata:
+            raise RuntimeError(t("strata_not_started", line=log_tail(), log=LOG_FILE))
         raise RuntimeError(t("server_timeout", min=limit // 60, log=LOG_FILE))
     say(dim(t("server_test")))
-    status, body = http_json(
-        f"http://127.0.0.1:{state['port']}/v1/chat/completions",
-        {"model": state.get("model_id", state["profile"]), "messages": [{"role": "user", "content": "Say OK"}],
-         "max_tokens": 16},
-        timeout=300,
-    )
+    payload: dict = {"model": state.get("model_id", state["profile"]),
+                     "messages": [{"role": "user", "content": "Say OK"}], "max_tokens": 64 if strata else 16}
+    if strata:
+        # Flash-Next thinks by default; ask for a direct answer so the test gets real content.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    headers = {"Authorization": f"Bearer {state['api_key']}"} if strata and state.get("api_key") else {}
+    status, body = http_json(f"http://127.0.0.1:{state['port']}/v1/chat/completions", payload, timeout=300,
+                             headers=headers or None)
+    if strata and status != 200:
+        payload.pop("chat_template_kwargs", None)
+        status, body = http_json(f"http://127.0.0.1:{state['port']}/v1/chat/completions", payload,
+                                 timeout=300, headers=headers or None)
     if status != 200 or not body.get("choices"):
         raise RuntimeError(t("server_no_answer", log=LOG_FILE))
     say(ok(t("server_ok")))
@@ -1632,6 +1892,8 @@ def wait_ready(state: dict) -> None:
 
 def running_state() -> dict | None:
     state = read_state()
+    if state.get("engine") == "strata":
+        return state if is_healthy(int(state.get("port") or 0)) else None
     if state.get("pid") and pid_alive(state["pid"]):
         return state
     return None
@@ -1639,6 +1901,24 @@ def running_state() -> dict | None:
 
 def stop_server() -> None:
     state = read_state()
+    if state.get("engine") == "strata" and not DRY_RUN:
+        port = int(state.get("port") or 0)
+        if is_healthy(port):
+            say(t("strata_stopping"))
+            try:
+                strata_control("launch", "--stop", timeout=120)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                say(fail(str(error)))
+            for _ in range(20):
+                if not is_healthy(port):
+                    break
+                time.sleep(0.5)
+        else:
+            say(t("no_server"))
+        state.pop("pid", None)
+        if STATE_FILE.exists():
+            write_state(state)
+        return
     pid = state.get("pid")
     if pid and pid_alive(pid):
         say(t("stopping", pid=pid))
@@ -1677,12 +1957,13 @@ def bring_up(profile: Profile) -> dict:
 
 # ───────────────────────────── speed test ─────────────────────────────
 
-def _stream_completion(port: int, model_id: str, prompt: str, max_tokens: int) -> dict:
+def _stream_completion(port: int, model_id: str, prompt: str, max_tokens: int, headers: dict | None = None) -> dict:
     """Streams one answer; returns prompt/answer token counts, time to first token and generation time."""
     payload = {"model": model_id, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
                "temperature": 0, "stream": True, "stream_options": {"include_usage": True}}
     request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
-                                     data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json", **(headers or {})})
     started, first, chunks, usage = time.time(), None, 0, {}
     with urllib.request.urlopen(request, timeout=900) as response:
         for raw in response:
@@ -1727,10 +2008,11 @@ def speed_test(profile: Profile) -> None:
     numbers = ", ".join(str(n) for n in range(1, 1500))
     long_prompt = f"Here is a list: {numbers}. How many items are in the list? Answer with one number."
     short_prompt = "Write a short story (about 200 words) about a robot that learns to paint."
+    headers = {"Authorization": f"Bearer {state['api_key']}"} if profile.engine == "strata" and state.get("api_key") else {}
     try:
-        _stream_completion(state["port"], state["model_id"], "Say OK", 8)  # warm-up
-        prefill = _stream_completion(state["port"], state["model_id"], long_prompt, 16)
-        gen = _stream_completion(state["port"], state["model_id"], short_prompt, 300)
+        _stream_completion(state["port"], state["model_id"], "Say OK", 8, headers)  # warm-up
+        prefill = _stream_completion(state["port"], state["model_id"], long_prompt, 16, headers)
+        gen = _stream_completion(state["port"], state["model_id"], short_prompt, 300, headers)
     except (urllib.error.URLError, OSError, ValueError) as error:
         say(fail(t("bench_fail", error=error)))
         return
@@ -1752,8 +2034,11 @@ def speed_test(profile: Profile) -> None:
 
 # ───────────────────────────── OpenCode ─────────────────────────────
 
-def write_opencode_config(profile: Profile, port: int, ctx: int) -> None:
+def write_opencode_config(profile: Profile, port: int, ctx: int, api_key: str | None = None) -> None:
     model_id = api_model(profile)
+    options: dict = {"baseURL": f"http://127.0.0.1:{port}/v1"}
+    if profile.engine == "strata":
+        options["apiKey"] = api_key or "strata-local"  # the key the wizard launched Strata with
     config = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
@@ -1761,7 +2046,7 @@ def write_opencode_config(profile: Profile, port: int, ctx: int) -> None:
         "provider": {"local-ai-starter": {
             "npm": "@ai-sdk/openai-compatible",
             "name": f"Local AI Starter ({ENGINE_NAMES[profile.engine]})",
-            "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+            "options": options,
             "models": {model_id: {"name": f"{profile.key} ({ENGINE_NAMES[profile.engine]}, local)",
                                   "tool_call": True, "limit": {"context": ctx, "output": 4096}}},
         }},
@@ -1794,7 +2079,7 @@ def opencode_env() -> dict:
 
 def launch_opencode(profile: Profile, state: dict, workdir: Path | None = None) -> None:
     """Opens OpenCode in the wizard's workspace, or in `workdir` (a folder of the user's own)."""
-    write_opencode_config(profile, state["port"], state.get("ctx", context_size()))
+    write_opencode_config(profile, state["port"], state.get("ctx", context_size()), state.get("api_key"))
     if workdir is None:
         prepare_workspace()  # never writes into a folder that is not ours
     cwd = workdir or WORKSPACE_DIR
@@ -2163,7 +2448,7 @@ def run_case(case: dict, profile: Profile, run_dir: Path, run_id: str) -> dict:
 
 def _run_code_case(case: dict, profile: Profile, work: Path, run_dir: Path, row: dict, extra: dict) -> dict:
     state = bring_up(profile)
-    write_opencode_config(profile, state["port"], state.get("ctx", context_size()))
+    write_opencode_config(profile, state["port"], state.get("ctx", context_size()), state.get("api_key"))
     binary = opencode_binary() or OPENCODE_DIR / exe("opencode")
     command = [str(binary), "run", "--format", "json", "--auto", "--model",
                f"local-ai-starter/{api_model(profile)}", "--dir", str(work), case["prompt"]]
@@ -2520,6 +2805,8 @@ def profile_title(profile: Profile) -> str:
 def available(profile: Profile) -> bool:
     if profile.engine == "mlx":
         return is_apple_silicon()
+    if profile.engine == "strata":
+        return strata_supported()
     return profile.engine != "sd" or media_supported()
 
 
@@ -2542,9 +2829,11 @@ def choose_kind() -> str:
 
 
 def choose_engine() -> str:
-    if not is_apple_silicon():
-        return "gguf"
-    engines = ["gguf", "mlx"]
+    engines = ["gguf"] + (["mlx"] if is_apple_silicon() else [])
+    if strata_supported():
+        engines.append("strata")
+    if len(engines) == 1:
+        return engines[0]
     options = []
     for engine in engines:
         label = t("engine." + engine)
@@ -2585,6 +2874,9 @@ def engine_task(engine: str) -> tuple:
     if engine == "mlx":
         return (t("plan_mlx", uv=UV_VERSION, py=MLX_PYTHON, ver=MLX_LM_VERSION), MLX_SIZE_MB / 1024,
                 [UV_URL, MLX_PYPI_URL], install_mlx)
+    if engine == "strata":
+        return (t("plan_strata", ver=STRATA_VERSION), STRATA_SIZE_MB / 1024,
+                [STRATA_INSTALLERS["install.sh"][0], STRATA_INSTALLERS["install.ps1"][0]], install_strata)
     return (t("plan_engine", build=LLAMA_BUILD), LLAMA_SIZE_MB / 1024, [llama_asset()[0]], install_llama)
 
 
@@ -2593,12 +2885,23 @@ def ensure_installed(profile: Profile | None) -> Profile:
     if profile is None:
         profile = choose_profile()
     tasks = []
+    plan: dict | None = None
+    if profile.engine == "strata" and not DRY_RUN:
+        plan = strata_plan(profile)  # refuses to continue when no engine exists for this card
+        if plan:
+            strata_check_plan(profile, plan)
     if not engine_installed(profile.engine) or DRY_RUN:
         tasks.append(engine_task(profile.engine))
     if not profile.installed or DRY_RUN:
-        size = sum(c.size for c in profile.missing) if profile.components else profile.size
-        urls = [c.url for c in profile.missing] or [profile.url]
-        tasks.append((t("plan_model", file=profile.label_path), size / 2**30, urls, lambda: install_model(profile)))
+        if profile.engine == "strata":
+            gb = ((plan or {}).get("download") or {}).get("gb") or profile.size / 2**30
+            tasks.append((t("plan_strata_model", family=profile.family, model=profile.file), float(gb),
+                          [profile.url, "https://huggingface.co"], lambda: None))  # downloads at first start
+        else:
+            size = sum(c.size for c in profile.missing) if profile.components else profile.size
+            urls = [c.url for c in profile.missing] or [profile.url]
+            tasks.append((t("plan_model", file=profile.label_path), size / 2**30, urls,
+                          lambda: install_model(profile)))
     if profile.kind == "code" and (not opencode_binary() or DRY_RUN):
         tasks.append((t("plan_opencode", ver=OPENCODE_VERSION), OPENCODE_SIZE_MB / 1024,
                       [opencode_asset()[0]], install_opencode))
@@ -2643,6 +2946,8 @@ def show_status() -> None:
     say(f"llama.cpp {LLAMA_BUILD}: {installed(server_binary())}")
     if is_apple_silicon():
         say(f"MLX (mlx-lm {MLX_LM_VERSION}): {installed(mlx_installed())}")
+    if strata_supported():
+        say(f"Strata {STRATA_VERSION}: {installed(strata_installed())}")
     if media_supported():
         say(f"stable-diffusion.cpp {SD_BUILD}: {installed(sd_binary())}")
     say(f"OpenCode {OPENCODE_VERSION}: {installed(opencode_binary())}")

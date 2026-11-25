@@ -15,6 +15,12 @@ printf '\n\n1\n' | LOCAL_AI_STARTER_DRY_RUN=1 LOCAL_AI_STARTER_HOME="$(mktemp -d
 - **Перенос настроек агентов** ([transfer](../entities/transfer.md)): `tests/test_transfer.py`
   накрывает глобальный перенос в оба агента и обратно, проектные скиллы/команды, симлинки и
   `AGENTS.override.md` Codex, отказ от перезаписи существующих файлов; проверено 2026-11-13, 5/5 OK.
+- **Strata** ([strata-engine](../entities/strata-engine.md)): `tests/test_strata.py` — профили,
+  `strata_supported` по платформам, разбор плана, `strata_check_plan` (скачанный-но-непригодный
+  движок против ещё-не-скачанного), матчинг установленных, ветки сервера (dry-run старт, стоп
+  через CLI, `running_state` по здоровью порта); все вызовы `strata_control` заглушены.
+  Живая проверка без модели: `LOCAL_AI_STARTER_HOME=$(mktemp -d) python3 -c` → `install_strata()`,
+  `strata_plan(PROFILES["inkling-2-mini-sq10"])` (11,1 ГБ, без загрузки весов), проверено 2026-11-25.
 - **Обновление при запуске**: `tests/test_update_startup.py` — обрезанный/неполный ответ сервера
   обновлений не должен ронять запуск; проверено 2026-11-13.
 

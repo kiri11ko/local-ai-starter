@@ -3,7 +3,7 @@
 English | [Русский](README.ru.md)
 
 One double-click and you get local AI on your own computer: a coding assistant
-(llama.cpp or MLX, a Qwen model and OpenCode in the terminal), image and video generation
+(llama.cpp, MLX or Strata, a local model and OpenCode in the terminal), image and video generation
 (stable-diffusion.cpp) and text-to-speech (llama.cpp). The wizard downloads what is needed
 and runs it. A set of test cases compares the downloaded models on the same tasks.
 macOS, Linux, Windows. No cloud, no API keys, no command-line flags.
@@ -23,8 +23,10 @@ Requires Python 3.9+. Pick options with the **↑/↓** arrows (or type a number
 press **Enter**. Enter alone takes the recommended option.
 
 1. It checks memory and disk space and asks what you want to do: code, images, video
-   or speech. For code on Apple Silicon it also asks which engine to use (llama.cpp or
-   MLX). Then it suggests the largest model that fits your memory.
+   or speech. For code it also asks which engine to use: llama.cpp (every system), MLX
+   (Apple Silicon) or Strata (a separate engine built for Qwen3.8 Flash Next; its engine
+   and models download on the first start). Then it suggests the largest model that fits
+   your memory.
 2. A plan with download sizes, and one confirmation ("Start?").
 3. It checks that GitHub and Hugging Face are reachable from your network, then
    downloads the engine, the model and OpenCode, starts the server and asks a test question.
@@ -93,6 +95,7 @@ local-ai/
     llama.cpp/    llama.cpp engine (pinned build, SHA-256 verified), also llama-tts for speech
     mlx/          MLX runtime on Apple Silicon: uv, its own Python 3.12, mlx-lm
     stable-diffusion.cpp/  image and video engine (pinned build, SHA-256 verified)
+    strata/       Strata Terminal (pinned installer); Strata's engines and model downloads land here too
   models/
     gguf/qwen/    GGUF models for llama.cpp, one file each
     mlx/qwen/     MLX models, one folder each
@@ -130,6 +133,25 @@ The wizard recommends the largest one that fits your memory.
 
 Context is 32K tokens: 16K below 12 GB of memory, 64K from 48 GB. OpenCode's
 instructions alone take about 10K. These are candidates, not a performance promise.
+
+### Strata models
+
+Strata is a third engine for code, built for **Qwen3.8-Flash-Next** (a 125B MoE with
+6B active parameters). Strata's Terminal downloads the engine for your graphics card and
+the model itself on the first start — that start can take a long time; an interrupted one
+resumes where it stopped. Sizes and memory are Strata's own launch-plan figures.
+
+| Model | Download | Memory (RAM + VRAM) |
+|---|---|---|
+| Inkling-2 Mini SQ-10 | 11.1 GB | 16 GB |
+| Inkling-2 Mini SQ-15 | ≈15.4 GB | 24 GB |
+| Qwen3.8 Flash Next Coder (IQ1_M) | ≈36 GB | 32 GB |
+| Qwen3.8 Flash Next Q2_0 | ≈70 GB | 48 GB |
+| Qwen3.8 Flash Next IQ2_XS | ≈71 GB | 48 GB |
+
+Strata needs macOS 15+ on Apple Silicon, or Linux/Windows x64 with an NVIDIA, AMD or
+Intel card. The Coder size is pruned for coding (weaker outside code and non-English
+text). The wizard keeps Strata's key and data inside `local-ai/engines/strata/`.
 
 ## Images, video and speech
 
@@ -189,10 +211,10 @@ appended to `local-ai/test-results/results.csv`, and `results.md` shows the late
 every model side by side. The format of a case file is described in
 [test-cases/README.md](test-cases/README.md), so you can add your own.
 
-## llama.cpp or MLX
+## llama.cpp, MLX or Strata
 
-On Apple Silicon both run on the GPU: llama.cpp through Metal, MLX natively. MLX is
-often faster on Macs. llama.cpp works on every system and has more mature tool
+On Apple Silicon llama.cpp and MLX both run on the GPU: llama.cpp through Metal, MLX
+natively. MLX is often faster on Macs. llama.cpp works on every system and has more mature tool
 calling, which OpenCode depends on. To compare them on your machine:
 
 1. Menu → "Another configuration", pick Code, an engine and a model.
@@ -200,6 +222,10 @@ calling, which OpenCode depends on. To compare them on your machine:
    generation (~300 tokens), and appends a line to `local-ai/benchmarks.csv`.
 3. Repeat with the other engine and the same model, then compare. Also try a real
    task in OpenCode: speed is not everything if tool calls fail.
+
+Strata plays in the same comparison: it serves the same OpenAI-compatible API on
+127.0.0.1, and OpenCode works with it unchanged. Its speeds land in the same
+`benchmarks.csv` and test-case tables.
 
 ## Updates
 

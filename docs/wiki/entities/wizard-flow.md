@@ -25,12 +25,16 @@ OpenCode или сеанса генерации, меню управления �
 - `run_opencode(profile)` — `local_ai_starter.py:2825`: `ensure_installed` → `bring_up` → `launch_opencode`.
 - `choose_kind()` — `local_ai_starter.py:2533`: код, картинки, видео, речь (картинки и видео — только где
   есть сборка sd.cpp); виды, у которых уже есть скачанная модель, помечены ✓.
-- `choose_engine()` — `local_ai_starter.py:2544`: только для кода и только на Apple Silicon спрашивает
-  llama.cpp (по умолчанию) или MLX; установленные помечены ✓. На остальных системах сразу `gguf`.
-- `ensure_installed(profile)` — `local_ai_starter.py:2591`. Профиль спрашивается, только если его нет.
-  Задачи — только недостающие: движок профиля (`engine_task`, `:2582`: `gguf`/`tts` → llama.cpp, `mlx`, `sd`),
-  модель (для медиа — только отсутствующие компоненты), OpenCode (только для кода). Дальше проверка места
-  (сумма + 1 ГБ), одно подтверждение, `check_network` по всем URL, шаги `[i/n]`.
+- `choose_engine()` — `local_ai_starter.py`: для кода спрашивает llama.cpp (по умолчанию), на
+  Apple Silicon ещё MLX, где поддержан Strata (`strata_supported()`) — и его; установленные
+  помечены ✓. Если вариант один, вопрос не задаётся.
+- `ensure_installed(profile)` — `local_ai_starter.py`. Профиль спрашивается, только если его нет.
+  Для strata сначала `strata_plan` + `strata_check_plan` (отказ, если движок скачан, но не годен
+  для карты). Задачи — только недостающие: движок профиля (`engine_task`: `gguf`/`tts` → llama.cpp,
+  `mlx`, `sd`, `strata` — терминал закреплённой версии), модель (для медиа — только отсутствующие
+  компоненты; для strata — `plan_strata_model`, скачивание произойдёт при первом запуске сервера),
+  OpenCode (только для кода). Дальше проверка места (сумма + 1 ГБ), одно подтверждение,
+  `check_network` по всем URL, шаги `[i/n]`.
 - `menu(profile)` — `local_ai_starter.py:3004`. Пункты: остановить и выйти (по умолчанию),
   выйти с работающим сервером, вернуться (в OpenCode или «Вернуться: <конфигурация>» для медиа),
   другая конфигурация, тест-кейсы, команда `local-opencode` ([opencode-integration](opencode-integration.md)),
