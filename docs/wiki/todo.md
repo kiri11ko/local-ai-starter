@@ -2,10 +2,13 @@
 
 ## Из подключения Strata (2026-11-25)
 
-- [ ] Живой прогон Strata: Inkling-2-Mini SQ-10 на машине с ≥16 ГБ (загрузка ~11 ГБ), затем
-  Flash-Next (≈70 ГБ, предупредить заранее). Готово: тест-кейс кода проходит через OpenCode,
-  строчки в `results.md`, скорости в `benchmarks.csv`; сверить эвристику
-  `strata_profile_installed` с реальной записью `strata models list --installed`.
+- [ ] Живой прогон Strata на MacBook Pro M4 Max 64 ГБ (машины — в глобальной Wiki,
+  `console-setup.md → «Машины»`): сначала Inkling-2-Mini SQ-10 (загрузка ~11 ГБ), затем
+  Flash-Next Q2_0 (≈70 ГБ — предупредить заранее; 48 ГБ RAM+VRAM влезают в 64) и Coder
+  IQ1_M (32 ГБ). Готово: тест-кейс кода проходит через OpenCode, строчки в `results.md`,
+  скорости в `benchmarks.csv`; сверить эвристику `strata_profile_installed` с реальной
+  записью `strata models list --installed`. На машине разработки (M5, 16 ГБ) из Strata
+  помещается только SQ-10.
 - [ ] Проверить на Windows, что `install.ps1` чтит `STRATA_DATA_DIR`/`STRATA_BIN_DIR`; если нет —
   терминал ставится в домашнюю папку, решить (согласованное исключение или свой распаковщик).
 - [ ] «Модели на диске»: показать/удалять модели Strata (сейчас они вне `MODELS_DIR`; кандидаты —
